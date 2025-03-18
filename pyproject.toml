@@ -1,0 +1,80 @@
+[project]
+authors = [{name = "Huang0520"}]
+name = "research"
+requires-python = ">=3.12, < 3.13"
+version = "0.1.0"
+dependencies = ["torch-geometric>=2.6.1,<3"]
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.project]
+channels = ["conda-forge", "nvidia", "dglteam/label/th24_cu121"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+research = { path = ".", editable = true }
+torch = { version = "==2.4.1", index = "https://download.pytorch.org/whl/cu121" }
+pyg-lib = { url = "https://data.pyg.org/whl/torch-2.4.0%2Bcu121/pyg_lib-0.4.0%2Bpt24cu121-cp312-cp312-linux_x86_64.whl" }
+torch-cluster = { url = "https://data.pyg.org/whl/torch-2.4.0%2Bcu121/torch_cluster-1.6.3%2Bpt24cu121-cp312-cp312-linux_x86_64.whl" }
+torch-scatter = { url = "https://data.pyg.org/whl/torch-2.4.0%2Bcu121/torch_scatter-2.1.2%2Bpt24cu121-cp312-cp312-linux_x86_64.whl" }
+torch-sparse = { url = "https://data.pyg.org/whl/torch-2.4.0%2Bcu121/torch_sparse-0.6.18%2Bpt24cu121-cp312-cp312-linux_x86_64.whl" }
+torch-spline-conv = { url = "https://data.pyg.org/whl/torch-2.4.0%2Bcu121/torch_spline_conv-1.2.2%2Bpt24cu121-cp312-cp312-linux_x86_64.whl" }
+torch-geometric-temporal = { git = "https://github.com/benedekrozemberczki/pytorch_geometric_temporal.git"}
+
+[tool.pixi.tasks]
+
+[tool.pixi.system-requirements]
+cuda = "12.0"
+
+[tool.pixi.dependencies]
+cuda = "==12.1"
+pandas = ">=2.2.3,<3"
+tabulate = ">=0.9.0,<0.10"
+dgl = { channel = "dglteam/label/th24_cu121" }
+packaging = ">=24.2,<25"
+requests = ">=2.32.3,<3"
+rich = ">=13.9.4,<14"
+
+# Linter & Formater
+[tool.ruff]
+target-version = "py312"
+preview = true
+
+select = [
+    "F", # Pyflakes
+    "E", # Pydocstyle Errors
+    "W", # Pydocstyle Warnings
+    "C90", # McCabe Complexity
+    "I001", # isort
+    "N", # pep8-naming
+    "UP", # pyupgrade
+    "PD", # Pandas-vet
+    "FLY", # Flynt
+    "RUF", # Ruff
+    "NPY", # Numpy
+    "PERF", # Performance
+    "PL", # Pylint
+]
+ignore = ["F401", "E402", "E203", "ANN401"]
+include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
+
+line-length = 88
+
+[tool.ruff.pydocstyle]
+convention = "google" # Accepts: "google", "numpy", or "pep257".
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 20
+
+[tool.pyright]
+exclude = ["**/__pycache__"]
+ignore = ["**/__init__.py"]
+venvPath = "."
+venv = ".pixi/envs/default"
+typeCheckingMode = "basic"
+reportAny = false
+extraPaths = ["./TGB"]
+
