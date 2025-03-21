@@ -23,9 +23,8 @@ class BaseDataset(DGLDataset, ABC):
         return self._snapshot_masks
 
     @property
-    @abstractmethod
     def snapshot_masks_path(self) -> Path:
-        pass
+        return self.raw_dir / "snapshot_masks.pt"
 
     @abstractmethod
     def __getitem__(self, idx) -> DGLGraph:
@@ -45,3 +44,6 @@ class BaseDataset(DGLDataset, ABC):
     @property
     def save_path(self):
         return self.raw_dir / f"{self.name}.bin"
+
+    def has_cache(self):
+        return self.save_path.exists() and self.snapshot_masks_path.exists()

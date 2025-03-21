@@ -1,12 +1,10 @@
-import json
 from dataclasses import dataclass
-from pathlib import Path
 
 import dgl
 import numpy as np
 import pandas as pd
 import torch
-from dgl.data.graph_serialize import load_graphs, save_graphs
+from dgl.data.graph_serialize import load_graphs
 
 from research.dataset.base import BaseDataset
 from research.utils.download import download_google
@@ -24,7 +22,7 @@ class GoogleFileID:
     addr_addr_edges: str = "1x5JdNWX8fVM3FO8I0wOLDAeh2qaB53uV"
 
 
-class EpllipticTxTx(BaseDataset):
+class EllipticTxTx(BaseDataset):
     def __init__(self, save_dir="./data", force_reload=False):
         self._edge_id = GoogleFileID.tx_tx_edges
         self._node_feature_id = GoogleFileID.tx_features
@@ -86,9 +84,6 @@ class EpllipticTxTx(BaseDataset):
         glist, _ = load_graphs(str(self.save_path), [0])
         self._graph = glist[0]
 
-    def has_cache(self):
-        return self.save_path.exists()
-
     def _download(self):
         if (
             self.raw_edge_path.exists()
@@ -117,15 +112,9 @@ class EpllipticTxTx(BaseDataset):
     def raw_node_label_path(self):
         return self.raw_dir / "txs_classes.csv"
 
-    @property
-    def snapshot_masks_path(self) -> Path:
-        return self.raw_dir / "snapshot_masks.pt"
-
 
 if __name__ == "__main__":
     from dgl.dataloading import GraphDataLoader
 
-    dataset = EpllipticTxTx()
+    dataset = EllipticTxTx()
     dataloader = GraphDataLoader(dataset)
-
-    breakpoint()
