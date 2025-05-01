@@ -1,101 +1,133 @@
 import dgl
-import numpy as np
-import pandas as pd
-import torch
-from dgl.data.utils import load_graphs
+import polars as pl
+import polars.selectors as cs
 
 from research.dataset.base import BaseDataset
 from research.utils.download import download_url
 
+EDGE_URL = "https://snap.stanford.edu/data/soc-redditHyperlinks-body.tsv"
+NODE_URL = "https://snap.stanford.edu/data/web-redditEmbeddings-subreddits.csv"
+
 
 class RedditBodyDataset(BaseDataset):
     def __init__(self, save_dir="./data", force_reload=False):
-        self._edge_url = "https://snap.stanford.edu/data/soc-redditHyperlinks-body.tsv"
-        self._node_url = (
-            "https://snap.stanford.edu/data/web-redditEmbeddings-subreddits.csv"
-        )
+        self._edge_url = EDGE_URL
+        self._node_url = NODE_URL
         super().__init__(
             name="reddit-body", raw_dir=save_dir, force_reload=force_reload
         )
 
     def process(self):
-        df_edges = pd.read_csv(
+        df_edges = pl.read_csv(
             self.raw_edge_path,
-            sep="\t",
-            parse_dates=[3],  # Columns index of TIMESTAMP
-            date_format="%Y-%m-%d %H:%M:%S",
-        )
-        df_nodes = pd.read_csv(self.raw_node_path, header=None, index_col=0)
-
-        # Create subreddit id to node id dict
-        subreddit_ids = pd.unique(
-            df_edges.loc[:, ("SOURCE_SUBREDDIT", "TARGET_SUBREDDIT")].to_numpy().ravel()
-        )
-        subreddit_ids = np.sort(subreddit_ids)  # type:ignore
-        self.subreddit_cat_type = pd.api.types.CategoricalDtype(
-            subreddit_ids, ordered=True
+            separator="\t",
+        ).with_columns(pl.col("TIMESTAMP").str.to_datetime("%Y-%m-%d %H:%M:%S"))
+        df_nodes = pl.read_csv(
+            self.raw_node_path, has_header=False, new_columns=["subreddit"]
         )
 
-        df_edges["SOURCE_SUBREDDIT"] = df_edges["SOURCE_SUBREDDIT"].astype(
-            self.subreddit_cat_type
-        )
-        df_edges["TARGET_SUBREDDIT"] = df_edges["TARGET_SUBREDDIT"].astype(
-            self.subreddit_cat_type
+        # Extract used subreddit as categories
+        subreddit_enum = pl.Enum(
+            pl.concat(df_edges.select("SOURCE_SUBREDDIT", "TARGET_SUBREDDIT"))
+            .unique()
+            .sort()
         )
 
         # Extract node feature
         # Using mean value as the missing embedding (from ROLAND)
-        node_features = torch.ones((len(self.subreddit_cat_type.categories), 300))
-        node_features *= np.mean(df_nodes.to_numpy())
-        for i, subreddit in enumerate(self.subreddit_cat_type.categories):
-            if subreddit in df_nodes.index:
-                node_features[i, :] = torch.Tensor(df_nodes.loc[subreddit].to_numpy())
-
-        # Extract edge feature
-        property_strs = df_edges["PROPERTIES"].to_numpy()
-        edge_features = torch.Tensor(
-            np.array([x.split(",") for x in property_strs]).astype("float64")
+        node_mean_feat = (
+            df_nodes.select(pl.concat_list(cs.exclude("subreddit").mean()))
+            .item()
+            .to_list()
         )
-        edge_label = torch.Tensor(df_edges["LINK_SENTIMENT"].to_numpy())
 
-        # Create snapshot mask (1 week interval)
-        time_start = df_edges["TIMESTAMP"].min()
-
-        df_edges["TIMESTEP"] = (df_edges["TIMESTAMP"] - time_start) // pd.Timedelta(
-            weeks=1
+        df_node_ir = (
+            pl.DataFrame(subreddit_enum.categories, schema=["subreddit"])
+            .join(
+                df_nodes.select(
+                    "subreddit",
+                    pl.concat_list(cs.exclude("subreddit")).alias("feat"),
+                ),
+                on="subreddit",
+                how="left",
+            )
+            .select(
+                pl.col("subreddit").cast(subreddit_enum).to_physical().alias("nid"),
+                pl.col("feat")
+                .fill_null(node_mean_feat)
+                .cast(pl.Array(pl.Float32, shape=len(node_mean_feat))),
+            )
         )
-        self._snapshot_masks = torch.Tensor(
-            np.array([
-                (df_edges["TIMESTEP"] == step).to_numpy()
-                for step in range(
-                    df_edges["TIMESTEP"].min(),  # type:ignore
-                    df_edges["TIMESTEP"].max() + 1,
-                )
-            ])
-        ).to(torch.bool)
 
-        src = df_edges["SOURCE_SUBREDDIT"].cat.codes.to_numpy(copy=True)
-        dst = df_edges["TARGET_SUBREDDIT"].cat.codes.to_numpy(copy=True)
+        # Create intermediate dataframe
+        # Transform edge feat
+        df_edge_ir = df_edges.select(
+            # Subreddit name to subreddit id
+            pl.col("SOURCE_SUBREDDIT")
+            .cast(subreddit_enum)
+            .alias("src_nid")
+            .to_physical(),
+            pl.col("TARGET_SUBREDDIT")
+            .cast(subreddit_enum)
+            .alias("dst_nid")
+            .to_physical(),
+            pl.col("PROPERTIES").str.split(",").cast(pl.List(pl.Float32)).alias("feat"),
+            pl.col("LINK_SENTIMENT").alias("label"),
+            # Time stamp to time step (1 week interval)
+            ((pl.col("TIMESTAMP") - pl.col("TIMESTAMP").min()) / pl.duration(weeks=1))
+            .floor()
+            .cast(pl.Int32)
+            .alias("timestep"),
+        ).with_row_index("eid")
 
-        # Create graph
-        self._graph = dgl.graph((src, dst))
-        self._graph.ndata["feature"] = node_features
-        self._graph.edata["feature"] = edge_features
-        self._graph.edata["label"] = edge_label
+        # List to Array
+        edge_feat_size = df_edge_ir.select(pl.col("feat").list.len()).max().item()
+        df_edge_ir = df_edge_ir.with_columns(
+            pl.col("feat").cast(pl.Array(pl.Float32, shape=edge_feat_size))
+        )
+
+        # Create edge snapshot mask
+        max_step = df_edge_ir.select("timestep").max().item()
+        df_edge_ir = df_edge_ir.with_columns(
+            (pl.col("timestep") == i).alias(f"mask_{i}") for i in range(max_step)
+        )
+
+        # Extract node indices of each snapshot
+        node_indices = (
+            df_edge_ir.filter(f"mask_{i}")
+            .unpivot(("src_nid", "dst_nid"))
+            .select(pl.col("value").unique())
+            .to_series()
+            .to_list()
+            for i in range(max_step)
+        )
+
+        # Create node snapshot mask
+        df_node_ir = df_node_ir.with_columns(
+            pl.col("nid").is_in(indices).alias(f"mask_{i}")
+            for i, indices in enumerate(node_indices)
+        )
+
+        self._df_nodes = df_node_ir
+        self._df_edges = df_edge_ir.drop("timestep")
+        self._num_snapshots = self._df_nodes.select(cs.starts_with("mask_")).width
+
+        self._graph = self._create_dgl_graph()
 
     def __getitem__(self, idx):
-        return dgl.edge_subgraph(
-            self.graph, self.snapshot_masks[idx], relabel_nodes=False
-        )
+        if idx >= self._num_snapshots:
+            raise IndexError
+        return dgl.edge_subgraph(self.graph, self.df_edges[f"mask_{idx}"].to_torch())
+
+    def load(self):
+        self._df_nodes = pl.read_parquet(self.df_nodes_path)
+        self._df_edges = pl.read_parquet(self.df_edges_path)
+        self._num_snapshots = self._df_nodes.select(cs.starts_with("mask_")).width
+        self._graph = self._create_dgl_graph()
 
     def download(self):
         download_url(self._edge_url, self.raw_edge_path)
         download_url(self._node_url, self.raw_node_path)
-
-    def load(self):
-        self._snapshot_masks = torch.load(self.snapshot_masks_path, weights_only=True)
-        glist, _ = load_graphs(str(self.save_path), [0])
-        self._graph = glist[0]
 
     def _download(self):
         if self.raw_edge_path.exists() and self.raw_node_path.exists():
@@ -114,14 +146,6 @@ class RedditBodyDataset(BaseDataset):
 
 
 if __name__ == "__main__":
-    dataset = RedditBodyDataset()
-    for snapshot in dataset:
-        edge_record = set()
-        for src, dst in zip(*snapshot.edges()):
-            edge = (src.item(), dst.item())
-            if edge in edge_record:
-                breakpoint()
-            else:
-                edge_record.add(edge)
+    dataset = RedditBodyDataset(force_reload=True)
 
     breakpoint()

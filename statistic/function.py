@@ -1,10 +1,13 @@
 from collections import defaultdict
 
 import dgl
-import numpy as np
+import polars as pl
+import polars.selectors as cs
 import torch
-from dgl.heterograph import DGLGraph
+from dgl import DGLGraph
 from torch import Tensor
+
+from research.dataset.base import BaseDataset
 
 
 def find_nodes(g: DGLGraph) -> Tensor:
@@ -15,18 +18,118 @@ def find_num_nodes(g: DGLGraph) -> int:
     return len(find_nodes(g))
 
 
+def find_edge_overlap_(dataset: BaseDataset, g1_idx: int, g2_idx: int):
+    g1 = dataset[g1_idx]
+    g2 = dataset[g2_idx]
+
+    # Find orignal nid/eid to new nid/eid map
+    g1_nid_map = {orig: new for new, orig in enumerate(g1.ndata[dgl.NID].tolist())}
+    g1_eid_map = {orig: new for new, orig in enumerate(g1.edata[dgl.EID].tolist())}
+    g2_nid_map = {orig: new for new, orig in enumerate(g2.ndata[dgl.NID].tolist())}
+    g2_eid_map = {orig: new for new, orig in enumerate(g2.edata[dgl.EID].tolist())}
+
+    # Filter dataframe will use
+    lf_ir = dataset.lf_edges.select(
+        cs.exclude(cs.starts_with("mask_")),
+        pl.col(f"mask_{g1_idx}").alias("mask_g1"),
+        pl.col(f"mask_{g2_idx}").alias("mask_g2"),
+    ).filter(pl.any_horizontal("mask_g1", "mask_g2"))
+
+    # Transform nid, eid to snapshot nid, eid
+    lf_ir = lf_ir.with_columns(
+        g1_src_nid=pl.col("src_nid").replace(g1_nid_map),
+        g1_dst_nid=pl.col("dst_nid").replace(g1_nid_map),
+        g2_src_nid=pl.col("src_nid").replace(g2_nid_map),
+        g2_dst_nid=pl.col("dst_nid").replace(g2_nid_map),
+        g1_eid=pl.col("eid").replace(g1_eid_map),
+        g2_eid=pl.col("eid").replace(g2_eid_map),
+    ).drop("eid")
+
+    # Find common edge created by edge-life
+    lf_ir = lf_ir.with_columns(mask_common=pl.all_horizontal("mask_g1", "mask_g2"))
+
+    common_eid_pairs = lf_ir.filter("mask_common").select(
+        eid_pair=pl.concat_list("g1_eid", "g2_eid")
+    )
+
+    # duplicated_index = ("src_nid", "dst_nid", "feat")
+    # duplicated_eids = (
+    #     lf_ir.filter(~pl.col("mask_common"))
+    #     .group_by(duplicated_index)
+    #     .agg(pl.len(), pl.col("eid", "mask_g1", "mask_g2"))
+    #     .filter(
+    #         # Find the edges with same (u, v, feat)
+    #         pl.col("len") > 1,
+    #         # Drop the edges that all from same graph,
+    #         # e.g. e5, e7 is same but both at g1
+    #         pl.all_horizontal(pl.col("mask_g1", "mask_g2").list.any()),
+    #     )
+    #     .drop(*duplicated_index, "len")
+    #     .explode("*")
+    #     # If number of edges is odd, drop additional ones
+    #     .group_by("mask_g1", "mask_g2")
+    #     .agg(pl.col("eid"), pl.len())
+    #     .with_columns(pl.col("eid").list.sample(pl.min("len")))
+    #     .drop("mask_g1", "mask_g2", "len")
+    #     # .with_columns(pl.lit(True).alias("mask_duplicated"))
+    #     # .explode("eid")
+    # )
+
+    # Find non-common edges
+    g1_ext_edges = lf_ir.filter(~pl.col("mask_g2")).drop(
+        "mask_g1", "mask_g2", "g2_src_nid", "g2_dst_nid", "g2_eid"
+    )
+    g2_ext_edges = lf_ir.filter(~pl.col("mask_g1")).drop(
+        "mask_g1", "mask_g2", "g1_src_nid", "g1_dst_nid", "g1_eid"
+    )
+
+    overlap_eid_pairs = (
+        g1_ext_edges.join(g2_ext_edges, on=("src_nid", "dst_nid", "feat"))
+        .select("g1_eid", "g2_eid")
+        .with_row_index()
+        .collect()
+    )
+
+    selected_idx = []
+    if not overlap_eid_pairs.is_empty():
+        g1_selected_eids = set()
+        g2_selected_eids = set()
+        for i, g1_eid, g2_eid in overlap_eid_pairs.iter_rows():
+            if g1_eid not in g1_selected_eids and g2_eid not in g2_selected_eids:
+                selected_idx.append(i)
+                g1_selected_eids.add(g1_eid)
+                g2_selected_eids.add(g2_eid)
+
+        overlap_eid_pairs = overlap_eid_pairs[selected_idx, ["g1_eid", "g2_eid"]]
+
+    g1_ext_eids = (
+        g1_ext_edges.select("g1_eid")
+        .join(overlap_eid_pairs.lazy().select("g1_eid"), on="g1_eid", how="anti")
+        .collect()
+    )
+    g2_ext_eids = (
+        g2_ext_edges.select("g2_eid")
+        .join(overlap_eid_pairs.lazy().select("g2_eid"), on="g2_eid", how="anti")
+        .collect()
+    )
+
+    overlap_eid_pairs = (
+        common_eid_pairs.collect().to_series().to_list()
+        + overlap_eid_pairs.select(pl.concat_list("*")).to_series().to_list()
+    )
+
+    breakpoint()
+
+
 def find_edge_overlap(g1: DGLGraph, g2: DGLGraph) -> tuple[Tensor, Tensor, Tensor]:
     # Find common edges with same u, v between g1, g2
     g1_uv_to_eid: dict[tuple[int, int], list[int]] = defaultdict(list)
     g2_uv_to_eid: dict[tuple[int, int], list[int]] = defaultdict(list)
 
-    g1_uv = torch.stack(g1.edges(), dim=1).tolist()
-    g2_uv = torch.stack(g2.edges(), dim=1).tolist()
-
-    for eid, (u, v) in enumerate(g1_uv):
-        g1_uv_to_eid[u, v].append(eid)
-    for eid, (u, v) in enumerate(g2_uv):
-        g2_uv_to_eid[u, v].append(eid)
+    for eid, (i, j) in enumerate(torch.stack(g1.edges(), dim=1).tolist()):
+        g1_uv_to_eid[i, j].append(eid)
+    for eid, (i, j) in enumerate(torch.stack(g2.edges(), dim=1).tolist()):
+        g2_uv_to_eid[i, j].append(eid)
 
     common_uvs = g1_uv_to_eid.keys() & g2_uv_to_eid.keys()
 
@@ -52,18 +155,28 @@ def find_edge_overlap(g1: DGLGraph, g2: DGLGraph) -> tuple[Tensor, Tensor, Tenso
                 g1_feats[g1_uv_eids][:, None, :] == g2_feats[g2_uv_eids][None, :, :],  # type:ignore
                 dim=2,
             )
-            overlap_eids.extend(
-                (g1_uv_eids[i], g2_uv_eids[j])
-                for i, j in torch.nonzero(equal_feat_mask).tolist()
-            )
+
+            # Handle multi-edge situation that creat 1 to many common edges
+            # Like g1 has (n0, 5, 5, 3), (n1, 5, 5, 4)
+            # and g2 also has (m0, 5, 5, 3) and (m1, 5, 5, 4)
+            # It will create 4 common edges, but we only need 2
+            selected_i = set()
+            selected_j = set()
+            for i, j in torch.nonzero(equal_feat_mask).tolist():
+                if i in selected_i or j in selected_j:
+                    continue
+
+                selected_i.add(i)
+                selected_j.add(j)
+                overlap_eids.append((g1_uv_eids[i], g2_uv_eids[j]))
 
     g1_eids: Tensor = g1.edges("eid")
     g2_eids: Tensor = g2.edges("eid")
     overlap_eids = torch.Tensor(overlap_eids)
-    g1_non_overlap_eid = g1_eids[~torch.isin(g1_eids, overlap_eids[:, 0])]
-    g2_non_overlap_eid = g2_eids[~torch.isin(g2_eids, overlap_eids[:, 1])]
+    g1_non_overlap_eids = g1_eids[~torch.isin(g1_eids, overlap_eids[:, 0])]
+    g2_non_overlap_eids = g2_eids[~torch.isin(g2_eids, overlap_eids[:, 1])]
 
-    return overlap_eids, g1_non_overlap_eid, g2_non_overlap_eid
+    return overlap_eids, g1_non_overlap_eids, g2_non_overlap_eids
 
 
 def find_node_overlap(g1: DGLGraph, g2: DGLGraph) -> tuple[Tensor, Tensor, Tensor]:

@@ -11,6 +11,7 @@ from statistic.function import (
     find_amount_computes,
     find_amount_data_transfer,
     find_edge_overlap,
+    find_edge_overlap_,
     find_node_overlap,
     find_nodes,
     find_num_nodes,
@@ -42,10 +43,19 @@ stats = {
     "amount_total_computes": [],
     "amount_extra_computes": [],
 }
-# for snapshot_idx in range(0, len(dataset)):
-for snapshot_idx in track(range(0, len(dataset))):
+lf_nodes = dataset.lf_nodes
+lf_edges = dataset.lf_edges
+for snapshot_idx in range(len(dataset)):
+    # for snapshot_idx in track(range(0, len(dataset))):
     curr_snapshot = dataset[snapshot_idx]
-    num_nodes = find_num_nodes(curr_snapshot)
+    # num_nodes = find_num_nodes(curr_snapshot)
+
+    if snapshot_idx == 0:
+        continue
+
+    find_edge_overlap_(lf_edges, snapshot_idx - 1, snapshot_idx)
+
+    continue
 
     if snapshot_idx > 0:
         prev_snapshot = dataset[snapshot_idx - 1]
@@ -62,8 +72,6 @@ for snapshot_idx in track(range(0, len(dataset))):
             (prev_non_overlap_eids, curr_non_overlap_eids),
             (prev_non_overlap_nids, curr_non_overlap_nids),
         )
-        if len(overlap_eids) < prev_snapshot.num_edges():
-            overlap_eids = prev_snapshot.edges("eid")
     else:
         curr_nids = find_nodes(curr_snapshot)
         overlap_eids = torch.zeros(0)
@@ -103,7 +111,8 @@ for snapshot_idx in track(range(0, len(dataset))):
     stats["amount_total_computes"].append(total_computes)
     stats["amount_extra_computes"].append(only_extra_computes)
 
+breakpoint()
 
 df_stats = pl.DataFrame(stats)
 df_stats.write_csv(output_dir / "statistic.csv")
-breakpoint()
+# breakpoint()

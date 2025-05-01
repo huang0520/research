@@ -2,16 +2,17 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import dgl
-import torch
+import polars as pl
 from dgl.data import DGLDataset
-from dgl.data.graph_serialize import save_graphs
 from dgl.heterograph import DGLGraph
 
 
 class BaseDataset(DGLDataset, ABC):
     def __init__(self, *args, **kwargs):
         self._graph = dgl.graph(([0], [0]))
-        self._snapshot_masks = torch.zeros(0)
+        self._df_nodes = pl.DataFrame()
+        self._df_edges = pl.DataFrame()
+        self._num_snapshots = 0
         super().__init__(*args, **kwargs)
 
     @property
@@ -19,31 +20,55 @@ class BaseDataset(DGLDataset, ABC):
         return self._graph
 
     @property
-    def snapshot_masks(self):
-        return self._snapshot_masks
+    def df_nodes(self) -> pl.DataFrame:
+        return self._df_nodes
 
     @property
-    def snapshot_masks_path(self) -> Path:
-        return self.raw_dir / "snapshot_masks.pt"
+    def df_edges(self) -> pl.DataFrame:
+        return self._df_edges
+
+    @property
+    def lf_nodes(self) -> pl.LazyFrame:
+        return self._df_nodes.lazy()
+
+    @property
+    def lf_edges(self) -> pl.LazyFrame:
+        return self._df_edges.lazy()
 
     @abstractmethod
     def __getitem__(self, idx) -> DGLGraph:
         pass
 
     def __len__(self):
-        return len(self.snapshot_masks)
+        return self._num_snapshots
 
     def save(self):
-        torch.save(self.snapshot_masks, self.snapshot_masks_path)
-        save_graphs(str(self.save_path), self.graph)
+        self.df_nodes.write_parquet(self.df_nodes_path)
+        self.df_edges.write_parquet(self.df_edges_path)
+
+    def _create_dgl_graph(self):
+        src = self.df_edges["src_nid"].to_torch()
+        dst = self.df_edges["dst_nid"].to_torch()
+        num_nodes = self.df_nodes.select(pl.len()).item()
+
+        graph = dgl.graph((src, dst), num_nodes=num_nodes)
+        graph.ndata["feat"] = self.df_nodes["feat"].to_torch()
+        graph.edata["feat"] = self.df_edges["feat"].to_torch()
+        graph.edata["label"] = self.df_edges["label"].to_torch()
+
+        return graph
 
     @property
     def raw_dir(self):
         return Path(self._raw_dir).absolute() / self.name
 
     @property
-    def save_path(self):
-        return self.raw_dir / f"{self.name}.bin"
+    def df_nodes_path(self):
+        return self.raw_dir / "df_nodes.parquet"
+
+    @property
+    def df_edges_path(self):
+        return self.raw_dir / "df_edges.parquet"
 
     def has_cache(self):
-        return self.save_path.exists() and self.snapshot_masks_path.exists()
+        return self.df_nodes_path.exists() and self.df_edges_path.exists()
