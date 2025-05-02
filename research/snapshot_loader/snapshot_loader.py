@@ -1,6 +1,6 @@
 import gc
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 import dgl
 import torch as th
@@ -15,18 +15,55 @@ class IDMapper:
     global_id_range: th.Tensor
     sort_id_range: th.Tensor
     sort_indices: th.Tensor
-    device: th.device
+    device: str
     id_range_len: int
+
+    # Cache for GPU version
+    _gpu_mapper: Optional["IDMapper"] = None
+    # Cache for CPU version
+    _cpu_mapper: Optional["IDMapper"] = None
 
     def __init__(self, global_id_range: th.Tensor) -> None:
         # Local id range just from 0 ~ len(global_id_range) - 1, like following
         # self.local_id_range = range(global_id_range)
         self.global_id_range = global_id_range
         self.sort_id_range, self.sort_indices = th.sort(global_id_range)
-        self.device = global_id_range.device
+        self.device = global_id_range.device.type
         self.id_range_len = self.sort_id_range.shape[0]
 
+        # Initialize cache references
+        if self.device == "cuda":
+            self._gpu_mapper = self
+            self._cpu_mapper = None
+        else:
+            self._gpu_mapper = None
+            self._cpu_mapper = self
+
+    def _get_device_mapper(self, tensor_device: str):
+        """Get the appropriate mapper for the given device."""
+        if self.device == tensor_device:
+            return self
+
+        if tensor_device == "cuda":
+            if self._gpu_mapper is None:
+                self._gpu_mapper = self.to("cuda")
+            return self._gpu_mapper
+
+        if tensor_device == "cpu":
+            if self._cpu_mapper is None:
+                self._cpu_mapper = self.to("cpu")
+            return self._cpu_mapper
+
+        breakpoint()
+        raise ValueError("Something went wrong!!")
+
     def global_to_local(self, global_ids: th.Tensor, strict: bool = True) -> th.Tensor:
+        # Use the device mapper helper
+        if (tensor_device := global_ids.device.type) != self.device:
+            mapper = self._get_device_mapper(tensor_device)
+            return mapper.global_to_local(global_ids, strict)
+
+        # Same device, proceed with regular implementation
         indices = th.searchsorted(self.sort_id_range, global_ids)
 
         # strict == true: all input id should show in the id range
@@ -47,15 +84,40 @@ class IDMapper:
         return rst
 
     def local_to_global(self, local_ids: th.Tensor) -> th.Tensor:
+        # Use the device mapper helper
+        if (tensor_device := local_ids.device.type) != self.device:
+            mapper = self._get_device_mapper(tensor_device)
+            return mapper.local_to_global(local_ids)
+
         return self.global_id_range[local_ids]
 
-    def to(self, device: th.device) -> "IDMapper":
-        self.global_id_range = self.global_id_range.to(device)
-        self.sort_id_range = self.sort_id_range.to(device)
-        self.sort_indices = self.sort_indices.to(device)
-        self.device = device
+    def to(self, device: str):
+        # Check if we already have a mapper for this device
+        if device == "cuda" and self._gpu_mapper is not None:
+            return self._gpu_mapper
+        elif device == "cpu" and self._cpu_mapper is not None:
+            return self._cpu_mapper
 
-        return self
+        new_mapper = object.__new__(IDMapper)
+        new_mapper.global_id_range = self.global_id_range.to(device)
+        new_mapper.sort_id_range = self.sort_id_range.to(device)
+        new_mapper.sort_indices = self.sort_indices.to(device)
+        new_mapper.device = device
+        new_mapper.id_range_len = self.id_range_len
+
+        # Set up cache references
+        if device == "cuda":
+            new_mapper._gpu_mapper = new_mapper
+            new_mapper._cpu_mapper = self._cpu_mapper or self
+            if self.device == "cpu":
+                self._gpu_mapper = new_mapper
+        else:
+            new_mapper._cpu_mapper = new_mapper
+            new_mapper._gpu_mapper = self._gpu_mapper or self
+            if self.device == "cuda":
+                self._cpu_mapper = new_mapper
+
+        return new_mapper
 
 
 class IDGetter:
@@ -165,8 +227,8 @@ def create_ir(
 
     return SnapshotIR(
         idx=idx,
-        nids_mapper=nids_mapper.to(th.device("cuda")),
-        eids_mapper=eids_mapper.to(th.device("cuda")),
+        nids_mapper=nids_mapper,
+        eids_mapper=eids_mapper,
         nids_global=nids_global.cuda(),
         eids_global=eids_global.cuda(),
         src_nids_local=src_nids_local,
