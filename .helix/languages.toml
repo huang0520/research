@@ -1,0 +1,3 @@
+[language-server.jedi.config.workspace]
+# extraPaths = [".pixi/envs/default/lib/python3.12/site-packages"]
+environmentPath = "/home/matcha0714/project/research/.pixi/envs/default"

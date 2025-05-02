@@ -1,3 +1,4 @@
+import cProfile
 import time
 
 import dgl
@@ -20,74 +21,53 @@ dataset = edge_life(dataset, 7)
 # gconv = GraphConv(300, 10, allow_zero_in_degree=True).to("cuda")
 gconv = GraphConv(300, 10, bias=False, norm=False).to("cuda")
 
-with SnapshotLoader(dataset, 0, 173) as iter:
-    for idx, (graph, compute_eids) in enumerate(iter):
-        print(idx)
-        rst = gconv(graph, graph.ndata["feat"], compute_eids)
-        # breakpoint()
 
-breakpoint()
-
-# Aggregation selection
-g0_node_mask = dataset.df_nodes.select("mask_0").to_torch().ravel()
-g0_edge_mask = dataset.df_edges.select("mask_0").to_torch().ravel()
-g1_node_mask = dataset.df_nodes.select("mask_1").to_torch().ravel()
-g1_edge_mask = dataset.df_edges.select("mask_1").to_torch().ravel()
-
-g0_node_extra = g0_node_mask & ~g1_node_mask
-g1_node_extra = g1_node_mask & ~g0_node_mask
-
-g0_node_extra_index = torch.where(g0_node_extra)[0]
-g1_node_extra_index = torch.where(g1_node_extra)[0]
-
-g0_node_extra_out_nodes = (
-    dataset.df_edges.filter(pl.col("src_nid").is_in(g0_node_extra_index.tolist()))
-    .select(pl.col("dst_nid").unique())
-    .to_torch()
-    .ravel()
-)
-g1_node_extra_out_nodes = (
-    dataset.df_edges.filter(pl.col("src_nid").is_in(g1_node_extra_index.tolist()))
-    .select(pl.col("dst_nid").unique())
-    .to_torch()
-    .ravel()
-)
-
-
-breakpoint()
-
-times_our = []
-for _ in range(10):
-    with SnapshotLoader(dataset, 0, 173) as iter:
-        times = []
-        for _ in range(173):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            _ = next(iter)
-            torch.cuda.synchronize()
-            end = time.perf_counter()
-            del _
-            torch.cuda.empty_cache()
-            times.append((end - start) * 1000)
-        times_our.append(sum(times))
-
-
-times_dgl = []
-for _ in range(10):
+def tmp():
     times = []
-    for snapshot in dataset:
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        snapshot.to("cuda")
-        snapshot.ndata["feat"].cuda()
-        snapshot.edata["feat"].cuda()
-        torch.cuda.synchronize()
-        end = time.perf_counter()
-        del snapshot
-        torch.cuda.empty_cache()
-        times.append((end - start) * 1000)
-    times_dgl.append(sum(times))
+    for i in range(15):
+        with SnapshotLoader(dataset, 0, 173) as iter:
+            th.cuda.synchronize()
+            start = time.perf_counter()
+            for idx, (graph, compute_eids) in enumerate(iter):
+                # print(idx)
+                rst = gconv(graph, graph.ndata["feat"], compute_eids)
+            th.cuda.synchronize()
+            end = time.perf_counter()
 
+            # breakpoint()
+
+        if i >= 5:
+            times.append(end - start)
+        print(end - start)
+        th.cuda.empty_cache()
+
+    print(f"Avg: {sum(times) / len(times)}")
+
+
+cProfile.run("tmp()")
+
+# tmp()
+breakpoint()
+
+
+th.cuda.empty_cache()
+
+times = []
+for i in range(15):
+    th.cuda.synchronize()
+    start = time.perf_counter()
+    for snapshot in dataset:
+        snapshot = snapshot.to("cuda")
+        rst = gconv(snapshot, snapshot.ndata["feat"])
+    th.cuda.synchronize()
+    end = time.perf_counter()
+
+    if i >= 5:
+        times.append(end - start)
+    print(end - start)
+    th.cuda.empty_cache()
+
+print(f"Avg: {sum(times) / len(times)}")
 breakpoint()
 
 

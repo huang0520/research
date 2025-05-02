@@ -1,6 +1,6 @@
 import gc
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import dgl
 import torch as th
@@ -10,13 +10,21 @@ from polars import selectors as cs
 from research.dataset import BaseDataset
 
 
+# @th.jit.script
 class IDMapper:
+    global_id_range: th.Tensor
+    sort_id_range: th.Tensor
+    sort_indices: th.Tensor
+    device: th.device
+    id_range_len: int
+
     def __init__(self, global_id_range: th.Tensor) -> None:
         # Local id range just from 0 ~ len(global_id_range) - 1, like following
         # self.local_id_range = range(global_id_range)
         self.global_id_range = global_id_range
         self.sort_id_range, self.sort_indices = th.sort(global_id_range)
         self.device = global_id_range.device
+        self.id_range_len = self.sort_id_range.shape[0]
 
     def global_to_local(self, global_ids: th.Tensor, strict: bool = True) -> th.Tensor:
         indices = th.searchsorted(self.sort_id_range, global_ids)
@@ -24,18 +32,24 @@ class IDMapper:
         # strict == true: all input id should show in the id range
         # strict == false: input id not show in the id range will be ignore
         if strict:
-            assert (self.sort_id_range[indices] == global_ids).all()
+            assert (self.sort_id_range[indices] == global_ids).all(), (
+                "Some global IDs are not in the mapping range!!"
+            )
+            return self.sort_indices[indices]
         else:
-            mask = indices < len(self.sort_id_range)
-            matches = self.sort_id_range[indices[mask]] == global_ids[mask]
-            indices = indices[mask][matches]
+            mask = indices < self.id_range_len
+            valid_indices = indices[mask].contiguous()
+            valid_global_ids = global_ids[mask].contiguous()
 
-        return self.sort_indices[indices]
+            matches = self.sort_id_range[valid_indices] == valid_global_ids
+            rst = self.sort_indices[valid_indices[matches]]
+
+        return rst
 
     def local_to_global(self, local_ids: th.Tensor) -> th.Tensor:
         return self.global_id_range[local_ids]
 
-    def to(self, device: str) -> "IDMapper":
+    def to(self, device: th.device) -> "IDMapper":
         self.global_id_range = self.global_id_range.to(device)
         self.sort_id_range = self.sort_id_range.to(device)
         self.sort_indices = self.sort_indices.to(device)
@@ -78,7 +92,7 @@ class IDGetter:
         idx2: int | None = None,
         type: Literal["self", "overlap", "differ", "1_only"] = "self",
     ) -> th.Tensor:
-        return th.where(self.get_mask(idx1, idx2, type))[0]
+        return self.get_mask(idx1, idx2, type).nonzero(as_tuple=True)[0]
 
 
 @dataclass(slots=True, frozen=True)
@@ -151,8 +165,8 @@ def create_ir(
 
     return SnapshotIR(
         idx=idx,
-        nids_mapper=nids_mapper.to("cuda"),
-        eids_mapper=eids_mapper.to("cuda"),
+        nids_mapper=nids_mapper.to(th.device("cuda")),
+        eids_mapper=eids_mapper.to(th.device("cuda")),
         nids_global=nids_global.cuda(),
         eids_global=eids_global.cuda(),
         src_nids_local=src_nids_local,
@@ -259,17 +273,27 @@ def find_compute_eids(
     eid_getter: IDGetter,
     curr_ir: SnapshotIR,
 ):
-    # Find the edges only appear in previous and current snapshot
-    differ_eid_global = eid_getter.get_id(prev_idx, curr_idx, "differ")
-
     # Find the dst node of differ edges. The idx of nodes represent results that need
     # to be compute.
-    compute_dst_nids_global = ginfo.dst_nids[differ_eid_global].cuda()
+    compute_dst_nids_global = ginfo.dst_nids[
+        eid_getter.get_id(prev_idx, curr_idx, "differ")
+    ].cuda()
+
     compute_dst_nids_local = curr_ir.nids_mapper.global_to_local(
         compute_dst_nids_global, strict=False
-    ).unique()
+    ).unique(sorted=False)
 
-    return th.where(th.isin(curr_ir.dst_nids_local, compute_dst_nids_local))[0]
+    lookup: th.Tensor = th.zeros(
+        curr_ir.dst_nids_local.max() + 1,  # type:ignore
+        dtype=th.bool,
+        device="cuda",
+    )
+    lookup[compute_dst_nids_local] = True
+
+    mask = lookup[curr_ir.dst_nids_local]
+    indices = mask.nonzero(as_tuple=True)[0]
+
+    return indices
 
 
 class SnapshotLoader:

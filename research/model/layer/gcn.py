@@ -1,11 +1,7 @@
-from copy import copy
-
 import dgl
-from dgl.data.utils import idx2mask
 import torch as th
-import torch.nn.functional as F  # noqa
+from dgl import DGLGraph
 from dgl import function as fn
-from dgl.heterograph import DGLGraph
 from dgl.utils import expand_as_pair
 from torch import nn
 
@@ -38,32 +34,18 @@ class GraphConv(nn.Module):
     ):
         feat_src, feat_dst = expand_as_pair(feat, graph)
 
-        # Aggregate
         graph.srcdata["h"] = feat_src
+        # Aggregate all node in the graph
         if compute_eid is None:
             graph.update_all(fn.copy_u("h", "m"), fn.sum("m", "h"))
             rst = graph.dstdata["h"]
+
+        # Aggregate node which result will change
         else:
-            sg = dgl.edge_subgraph(graph, compute_eid)
-            sg.update_all(fn.copy_u("h", "m"), fn.sum("m", "out"))
-            rst = sg.dstdata["out"]
+            graph.send_and_recv(compute_eid, fn.copy_u("h", "m"), fn.sum("m", "out"))
+            rst = graph.dstdata["out"]
 
-            # graph.srcdata["h"] = feat_src
-            graph.update_all(fn.copy_u("h", "m"), fn.sum("m", "out"))
-            tmp = graph.dstdata["out"]
-
-            # Test
-            idx_h = {idx.item(): h for idx, h in zip(sg.dstdata["_ID"], rst)}
-
-            test_rst = {
-                (id, _id): th.allclose(sub_rst, tmp[_id], rtol=0.0001, atol=0.00001)
-                or (sub_rst == 0).all().item()
-                for id, (_id, sub_rst) in enumerate(idx_h.items())
-            }
-
-            if not all(test_rst.values()):
-                false_edge = [edge for edge, b in test_rst.items() if not b]
-                breakpoint()
+            # TODO: Need to combine previous result with current result
 
         # Update
         if self.weight is not None:
