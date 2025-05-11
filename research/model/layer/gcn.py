@@ -1,69 +1,71 @@
-import dgl
+from typing import override
+
 import torch as th
-from dgl import DGLGraph
-from dgl import function as fn
-from dgl.utils import expand_as_pair
-from torch import nn
+from torch import Tensor
+from torch_geometric.nn import GCNConv
+from torch_geometric.nn.conv.gcn_conv import gcn_norm
+from torch_geometric.typing import Adj, SparseTensor
+
+from research.compute import CacheableMixin
 
 
-class GraphConv(nn.Module):
-    def __init__(
-        self, in_feats, out_feats, bias: bool = True, norm: bool = True
-    ) -> None:
-        super().__init__()
-        self._in_feats = in_feats
-        self._out_feats = out_feats
-        self._norm = norm
-
-        self.weight = nn.Parameter(th.Tensor(in_feats, out_feats))
-        if bias:
-            self.bias = nn.Parameter(th.Tensor(out_feats))
-        else:
-            self.register_parameter("bias", None)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        if self.weight is not None:
-            nn.init.xavier_uniform_(self.weight)
-        if self.bias is not None:
-            nn.init.zeros_(self.bias)
-
-    def forward(
-        self, graph: DGLGraph, feat: th.Tensor, compute_eid: th.Tensor | None = None
+class CacheableGCNConv(GCNConv, CacheableMixin):
+    @override
+    def compute_aggregate(
+        self,
+        x: Tensor,
+        edge_index: Adj,
+        edge_weight: Tensor | None = None,
+        compute_eid: Tensor | None = None,
     ):
-        feat_src, feat_dst = expand_as_pair(feat, graph)
+        if isinstance(x, (tuple, list)):
+            raise ValueError(
+                f"'{self.__class__.__name__}' received a tuple "
+                f"of node features as input while this layer "
+                f"does not support bipartite message passing. "
+                f"Please try other layers such as 'SAGEConv' or "
+                f"'GraphConv' instead"
+            )
 
-        graph.srcdata["h"] = feat_src
-        # Aggregate all node in the graph
-        if compute_eid is None:
-            graph.update_all(fn.copy_u("h", "m"), fn.sum("m", "h"))
-            rst = graph.dstdata["h"]
+        if self.normalize:
+            if isinstance(edge_index, Tensor):
+                edge_index, edge_weight = gcn_norm(  # type:ignore
+                    edge_index,
+                    edge_weight,
+                    x.size(self.node_dim),
+                    self.improved,
+                    self.add_self_loops,
+                    self.flow,
+                    x.dtype,
+                )
+            elif isinstance(edge_index, SparseTensor):
+                edge_index = gcn_norm(
+                    edge_index,  # type:ignore
+                    edge_weight,
+                    x.size(self.node_dim),
+                    self.improved,
+                    self.add_self_loops,
+                    self.flow,
+                    x.dtype,
+                )
 
-        # Aggregate node which result will change
+        if compute_eid is None or compute_eid.size(0) == edge_index.size(1):
+            return self.propagate(edge_index, x=x, edge_weight=edge_weight)
         else:
-            graph.send_and_recv(compute_eid, fn.copy_u("h", "m"), fn.sum("m", "out"))
-            rst = graph.dstdata["out"]
+            # TODO: Allow sparse tensor
+            assert isinstance(edge_index, Tensor)
+            filtered_edge_index = edge_index[:, compute_eid]
+            dst_nid = filtered_edge_index[1]
+            out = th.zeros_like(x)
+            out[dst_nid] = self.propagate(
+                filtered_edge_index, x=x, edge_weight=edge_weight
+            )[dst_nid]
+            return out
 
-            # TODO: Need to combine previous result with current result
-
-        # Update
-        if self.weight is not None:
-            rst @= self.weight
-
-        # Normalize
-        if self._norm:
-            deg: th.Tensor = graph.in_degrees().to(feat_dst).clamp(min=1.0)
-            norm = deg**-0.5
-            norm = norm.reshape(norm.shape + (1,) * (feat_dst.dim() - 1))
-            rst *= norm
-
+    @override
+    def compute_update(self, x: Tensor) -> Tensor:
+        out = self.lin(x)
         if self.bias is not None:
-            rst += self.bias
+            out += self.bias
 
-        return rst
-
-    @staticmethod
-    def aggregate(nodes):
-        breakpoint()
-        return {"h": nodes.data["h"] + nodes.mailbox["m"].sum(1)}
+        return out

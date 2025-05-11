@@ -10,7 +10,7 @@ from rich.progress import (
 )
 
 
-def download_url(url, file_path):
+def download_url(url, file_path: str):
     progress = Progress(
         "[progress.description]{task.description}",
         BarColumn(),

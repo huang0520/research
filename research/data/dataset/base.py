@@ -5,9 +5,16 @@ import dgl
 import polars as pl
 from dgl.data import DGLDataset
 from dgl.heterograph import DGLGraph
+from torch_geometric.data import InMemoryDataset
+
+from research.data.base import MainData
 
 
-class BaseDataset(DGLDataset, ABC):
+class BaseDataset(InMemoryDataset):
+    _data: MainData
+
+
+class BaseDataset_(DGLDataset, ABC):
     def __init__(self, *args, **kwargs):
         self._graph = dgl.graph(([0], [0]))
         self._df_nodes = pl.DataFrame()

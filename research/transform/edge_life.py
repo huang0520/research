@@ -1,23 +1,22 @@
-from copy import deepcopy
+import torch as th
 
-import polars as pl
-
-from research.dataset.base import BaseDataset
+from research.data.dataset import BaseDataset
 
 
 def edge_life(dataset: BaseDataset, life: int = 2) -> BaseDataset:
-    dataset_ = deepcopy(dataset)
-    mask_windows = tuple(
-        tuple(f"mask_{i}" for i in range(max(0, idx - life + 1), idx + 1))
-        for idx in range(len(dataset))
-    )
-    dataset_._df_nodes = dataset.df_nodes.with_columns(
-        pl.any_horizontal(masks).alias(f"mask_{i}")
-        for i, masks in enumerate(mask_windows)
-    )
-    dataset_._df_edges = dataset.df_edges.with_columns(
-        pl.any_horizontal(masks).alias(f"mask_{i}")
-        for i, masks in enumerate(mask_windows)
-    )
+    orig_nmask = dataset._data.nmasks
+    orig_emask = dataset._data.emasks
+    nmask_ = th.zeros_like(orig_nmask)
+    emask_ = th.zeros_like(orig_emask)
 
-    return dataset_
+    assert orig_nmask.size(0) == orig_emask.size(0)
+
+    for i in range(orig_nmask.size(0)):
+        start = max(0, i - life)
+        nmask_[i] = orig_nmask[start : i + 1].any(dim=0)
+        emask_[i] = orig_emask[start : i + 1].any(dim=0)
+
+    dataset._data.nmasks = nmask_
+    dataset._data.emasks = emask_
+
+    return dataset
