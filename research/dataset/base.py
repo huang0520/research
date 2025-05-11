@@ -7,7 +7,7 @@ from dgl.data import DGLDataset
 from dgl.heterograph import DGLGraph
 from torch_geometric.data import InMemoryDataset
 
-from research.data.base import MainData
+from research.base import MainData
 
 
 class BaseDataset(InMemoryDataset):

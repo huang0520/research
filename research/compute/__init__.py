@@ -1,1 +1,1 @@
-from research.compute.cache_manager import AggregationCache, CacheableMixin
+from research.compute.cache_manager import AggCacheManager, CacheableMixin

@@ -1,6 +1,6 @@
 import torch as th
 
-from research.data.dataset import BaseDataset
+from research.dataset import BaseDataset
 
 
 def edge_life(dataset: BaseDataset, life: int = 2) -> BaseDataset:

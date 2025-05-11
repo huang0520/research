@@ -3,10 +3,12 @@ import time
 
 import torch as th
 from torch.cuda import synchronize
+from torch_geometric.nn.conv.gcn_conv import GCNConv
 
-from research.compute.cache_manager import AggregationCache
-from research.data import SnapshotManager
-from research.data.dataset import EllipticTxTx
+from research.base import SnapshotContext
+from research.compute.cache_manager import AggCacheManager, create_cached_model
+from research.dataset import EllipticTxTx
+from research.loader import SnapshotManager
 from research.model.layer.gcn import CacheableGCNConv
 from research.transform import edge_life
 from research.utils import edge_subgraph
@@ -14,44 +16,43 @@ from research.utils import edge_subgraph
 dataset = EllipticTxTx()
 dataset = edge_life(dataset, life=5)
 
-manager = SnapshotManager(dataset._data)
-cache = AggregationCache(manager)
+context = SnapshotContext(dataset._data)
+manager = SnapshotManager(context)
+_layer = GCNConv(182, 10, bias=True, normalize=False).to("cuda")
 layer = CacheableGCNConv(182, 10, bias=True, normalize=False).to("cuda")
 
 for id, (nmask, emask) in enumerate(zip(dataset._data.nmasks, dataset._data.emasks)):
     manager.register_snapshot(id, nmask, emask)
 
-cached_layer = cache.register_model(layer)
-
-for i, snapshot in manager.get_generator():
-    print(i)
-    cached_layer(snapshot.x, snapshot.edge_index, i)
-
-breakpoint()
+cached_layer = create_cached_model(layer, context)
 
 
-synchronize()
-for _ in range(5):
-    start = time.perf_counter()
-    for i, snapshot in manager.get_generator():
-        # print(snapshot.coo())
-        # breakpoint()
-        pass
+def tmp():
     synchronize()
-    end = time.perf_counter()
-    print(end - start)
+    for t in range(5):
+        start = time.perf_counter()
+        for i, snapshot in manager.get_generator():
+            _ = cached_layer(snapshot.x, snapshot.edge_index)
+        synchronize()
+        end = time.perf_counter()
+        print(end - start)
+        th.cuda.empty_cache()
 
-breakpoint()
+
+cProfile.run("tmp()")
 
 th.cuda.empty_cache()
+print()
 
 synchronize()
 for _ in range(5):
     start = time.perf_counter()
-    for i, info in manager.snapshots.items():
-        snapshot = edge_subgraph(dataset._data, info.eid).cuda(non_blocking=True)
+    for i, meta in context.metadata.items():
+        snapshot = edge_subgraph(dataset._data, meta.geid).cuda(non_blocking=True)
+        _ = _layer(snapshot.x, snapshot.edge_index)
     synchronize()
     end = time.perf_counter()
     print(end - start)
+    th.cuda.empty_cache()
 
 breakpoint()

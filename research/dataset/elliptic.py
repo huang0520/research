@@ -10,7 +10,7 @@ from dgl.data.graph_serialize import load_graphs
 from polars import selectors as cs
 from torch_geometric.data import Data
 
-from research.data.dataset.base import BaseDataset
+from research.dataset.base import BaseDataset
 from research.utils import download_google
 
 

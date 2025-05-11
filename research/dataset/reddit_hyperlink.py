@@ -2,7 +2,7 @@ import dgl
 import polars as pl
 import polars.selectors as cs
 
-from research.data.dataset import BaseDataset
+from research.dataset import BaseDataset
 from research.utils.download import download_url
 
 EDGE_URL = "https://snap.stanford.edu/data/soc-redditHyperlinks-body.tsv"

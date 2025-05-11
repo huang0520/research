@@ -1,7 +1,7 @@
 import torch as th
 from torch_geometric.utils.map import map_index
 
-from research.data import MainData, SubData
+from research.base import MainData, SubData
 
 
 def _subgraph(subset: th.Tensor, edge_index: th.Tensor):
