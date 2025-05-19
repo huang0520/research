@@ -9,50 +9,60 @@ from research.base import SnapshotContext
 from research.compute.cache_manager import AggCacheManager, create_cached_model
 from research.dataset import EllipticTxTx
 from research.loader import SnapshotManager
+from research.model import TGCN
 from research.model.layer.gcn import CacheableGCNConv
 from research.transform import edge_life
 from research.utils import edge_subgraph
 
+th.backends.cudnn.benchmark = True
+
 dataset = EllipticTxTx()
-dataset = edge_life(dataset, life=5)
+dataset = edge_life(dataset, life=3)
 
 context = SnapshotContext(dataset._data)
 manager = SnapshotManager(context)
-_layer = GCNConv(182, 10, bias=True, normalize=False).to("cuda")
-layer = CacheableGCNConv(182, 10, bias=True, normalize=False).to("cuda")
+model = TGCN(182, 3, 16, gcn_norm=False).to("cuda")
 
 for id, (nmask, emask) in enumerate(zip(dataset._data.nmasks, dataset._data.emasks)):
     manager.register_snapshot(id, nmask, emask)
 
-cached_layer = create_cached_model(layer, context)
+cached_model = create_cached_model(model, context)
+breakpoint()
 
 
 def tmp():
     synchronize()
     for t in range(5):
         start = time.perf_counter()
+        hn = None
         for i, snapshot in manager.get_generator():
-            _ = cached_layer(snapshot.x, snapshot.edge_index)
+            _, hn = cached_model(snapshot.x, snapshot.edge_index, hn)
         synchronize()
         end = time.perf_counter()
         print(end - start)
         th.cuda.empty_cache()
 
 
-cProfile.run("tmp()")
-
+# cProfile.run("tmp()")
+tmp()
 th.cuda.empty_cache()
-print()
+breakpoint()
 
-synchronize()
-for _ in range(5):
-    start = time.perf_counter()
-    for i, meta in context.metadata.items():
-        snapshot = edge_subgraph(dataset._data, meta.geid).cuda(non_blocking=True)
-        _ = _layer(snapshot.x, snapshot.edge_index)
+
+def base():
     synchronize()
-    end = time.perf_counter()
-    print(end - start)
-    th.cuda.empty_cache()
+    for _ in range(5):
+        start = time.perf_counter()
+        hn = None
+        for meta in context.metadata.values():
+            snapshot = edge_subgraph(dataset._data, meta.geid).cuda(non_blocking=True)
+            _, hn = model(snapshot.x, snapshot.edge_index, hn)
+        synchronize()
+        end = time.perf_counter()
+        print(end - start)
+        th.cuda.empty_cache()
 
+
+# cProfile.run("base()")
+base()
 breakpoint()

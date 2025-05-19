@@ -49,6 +49,7 @@ class CacheableGCNConv(GCNConv, CacheableMixin):
                     x.dtype,
                 )
 
+        # x = self.lin(x)
         if compute_eid is None or compute_eid.size(0) == edge_index.size(1):
             return self.propagate(edge_index, x=x, edge_weight=edge_weight)
         else:
@@ -69,3 +70,7 @@ class CacheableGCNConv(GCNConv, CacheableMixin):
             out += self.bias
 
         return out
+
+    @override
+    def edge_update(self) -> Tensor:
+        raise NotImplementedError

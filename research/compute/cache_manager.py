@@ -13,7 +13,7 @@ from research.loader import SnapshotManager
 
 
 def is_cacheable_module(obj: object) -> TypeGuard["CacheableModule"]:
-    return isinstance(obj, (nn.Module, CacheableMixin))
+    return isinstance(obj, nn.Module) and isinstance(obj, CacheableMixin)
 
 
 class CacheableMixin(ABC):
@@ -125,7 +125,8 @@ class CachedModule(nn.Module):
                 and self.context.prev_data is not None
             )
 
-            affected_curr_leid, unaffected_gnid = self._get_compute_info()
+            _, affected_curr_leid, unaffected_gnid = self._get_compute_info()
+
             prev_agg = self.context.prev_agg[self.layer_id]
             curr_agg = self.layer.compute_aggregate(
                 x, edge_index, compute_eid=affected_curr_leid
@@ -141,6 +142,7 @@ class CachedModule(nn.Module):
             curr_agg[unaffected_curr_lnid] = prev_agg[unaffected_prev_lnid]
 
         self.context.curr_agg[self.layer_id] = curr_agg
+
         return self.layer.compute_update(curr_agg)
 
     def _get_compute_info(self):
@@ -178,4 +180,4 @@ class CachedModule(nn.Module):
         unaffected_nmask = diff.keep_nmask & ~affected_nmask
         unaffected_gnid = mask_to_index(unaffected_nmask).to(self.context.device)
 
-        return affected_curr_leid, unaffected_gnid
+        return affected_curr_lnid, affected_curr_leid, unaffected_gnid
