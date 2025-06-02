@@ -1,6 +1,9 @@
-import dgl
+from pathlib import Path
+from typing import override
+
 import polars as pl
 import polars.selectors as cs
+from torch_geometric.data import Data
 
 from research.dataset import BaseDataset
 from research.utils.download import download_url
@@ -10,20 +13,28 @@ NODE_URL = "https://snap.stanford.edu/data/web-redditEmbeddings-subreddits.csv"
 
 
 class RedditBodyDataset(BaseDataset):
-    def __init__(self, save_dir="./data", force_reload=False):
-        self._edge_url = EDGE_URL
-        self._node_url = NODE_URL
-        super().__init__(
-            name="reddit-body", raw_dir=save_dir, force_reload=force_reload
-        )
+    @override
+    def __init__(
+        self,
+        root: str = "./data/reddit-body",
+        force_reload: bool = False,
+    ) -> None:
+        self.raw_edge_file_name = "soc-redditHyperlinks-body.tsv"
+        self.raw_node_file_name = "web-redditEmbeddings-subreddits.csv"
+        super().__init__(root=root, force_reload=force_reload)
+        self.load(self.processed_paths[0])
+        self._data = self._data.pin_memory()
 
+    @override
     def process(self):
+        raw_dir = Path(self.raw_dir)
         df_edges = pl.read_csv(
-            self.raw_edge_path,
-            separator="\t",
+            raw_dir / self.raw_edge_file_name, separator="\t"
         ).with_columns(pl.col("TIMESTAMP").str.to_datetime("%Y-%m-%d %H:%M:%S"))
         df_nodes = pl.read_csv(
-            self.raw_node_path, has_header=False, new_columns=["subreddit"]
+            raw_dir / self.raw_node_file_name,
+            has_header=False,
+            new_columns=["subreddit"],
         )
 
         # Extract used subreddit as categories
@@ -35,7 +46,7 @@ class RedditBodyDataset(BaseDataset):
 
         # Extract node feature
         # Using mean value as the missing embedding (from ROLAND)
-        node_mean_feat = (
+        node_mean_feat: list = (
             df_nodes.select(pl.concat_list(cs.exclude("subreddit").mean()))
             .item()
             .to_list()
@@ -108,44 +119,39 @@ class RedditBodyDataset(BaseDataset):
             for i, indices in enumerate(node_indices)
         )
 
-        self._df_nodes = df_node_ir
-        self._df_edges = df_edge_ir.drop("timestep")
-        self._num_snapshots = self._df_nodes.select(cs.starts_with("mask_")).width
+        nfeats = df_node_ir["feat"].to_torch()
+        efeats = df_edge_ir["feat"].to_torch()
+        edges = df_edge_ir.select(cs.ends_with("nid")).to_torch().T
+        nmasks = df_node_ir.select(cs.starts_with("mask")).to_torch().T
+        emasks = df_edge_ir.select(cs.starts_with("mask")).to_torch().T
 
-        self._graph = self._create_dgl_graph()
+        data_list = [
+            Data(
+                x=nfeats,
+                edge_index=edges,
+                edge_attr=efeats,
+                nmasks=nmasks,
+                emasks=emasks,
+            )
+        ]
 
-    def __getitem__(self, idx):
-        if idx >= self._num_snapshots:
-            raise IndexError
-        return dgl.edge_subgraph(self.graph, self.df_edges[f"mask_{idx}"].to_torch())
+        if self.pre_filter is not None:
+            data_list = [data for data in data_list if self.pre_filter(data)]
 
-    def load(self):
-        self._df_nodes = pl.read_parquet(self.df_nodes_path)
-        self._df_edges = pl.read_parquet(self.df_edges_path)
-        self._num_snapshots = self._df_nodes.select(cs.starts_with("mask_")).width
-        self._graph = self._create_dgl_graph()
+        if self.pre_transform is not None:
+            data_list = [self.pre_transform(data) for data in data_list]
 
+        self.save(data_list, self.processed_paths[0])
+
+    @override
     def download(self):
-        download_url(self._edge_url, self.raw_edge_path)
-        download_url(self._node_url, self.raw_node_path)
+        download_url(EDGE_URL, Path(self.raw_dir) / self.raw_edge_file_name)
+        download_url(NODE_URL, Path(self.raw_dir) / self.raw_node_file_name)
 
-    def _download(self):
-        if self.raw_edge_path.exists() and self.raw_node_path.exists():
-            return
+    @override
+    def raw_file_names(self) -> tuple[str, ...]:
+        return (self.raw_edge_file_name, self.raw_node_file_name)
 
-        self.raw_dir.mkdir(exist_ok=True)
-        self.download()
-
-    @property
-    def raw_edge_path(self):
-        return self.raw_dir / "soc-redditHyperlinks-body.tsv"
-
-    @property
-    def raw_node_path(self):
-        return self.raw_dir / "web-redditEmbeddings-subreddits.csv"
-
-
-if __name__ == "__main__":
-    dataset = RedditBodyDataset(force_reload=True)
-
-    breakpoint()
+    @override
+    def processed_file_names(self) -> str:
+        return "data.pt"

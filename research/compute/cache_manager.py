@@ -143,7 +143,9 @@ class CachedModule(nn.Module):
 
         self.context.curr_agg[self.layer_id] = curr_agg
 
-        return self.layer.compute_update(curr_agg)
+        # return self.layer.compute_update(curr_agg)
+        #
+        return curr_agg
 
     def _get_compute_info(self):
         assert self.context.curr_data is not None and self.context.prev_data is not None
@@ -174,10 +176,10 @@ class CachedModule(nn.Module):
         # Update diff
         affected_nmask = index_to_mask(
             affected_gnid, size=self.context.main_data.num_nodes
-        ).cpu()
+        )
 
         # Find global nid of keep aggregation result
-        unaffected_nmask = diff.keep_nmask & ~affected_nmask
-        unaffected_gnid = mask_to_index(unaffected_nmask).to(self.context.device)
+        unaffected_nmask = diff.keep_nmask.to(self.context.device) & ~affected_nmask
+        unaffected_gnid = mask_to_index(unaffected_nmask)
 
         return affected_curr_lnid, affected_curr_leid, unaffected_gnid

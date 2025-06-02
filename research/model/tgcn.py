@@ -19,7 +19,7 @@ class TGCN(nn.Module):
         self.gconv = CacheableGCNConv(
             gcn_in, gcn_out, normalize=gcn_norm, bias=gcn_bias
         )
-        self.rnn = nn.RNN(
+        self.gru = nn.GRU(
             input_size=gcn_out,
             hidden_size=rnn_hidden,
             num_layers=rnn_n_layer,
@@ -35,8 +35,8 @@ class TGCN(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         if hidden is None:
             hidden = self.initial_hidden
-            self.rnn.flatten_parameters()
+            self.gru.flatten_parameters()
 
         x = self.gconv(x, edge_index)
         x = x.view([1, *x.shape])
-        return self.rnn(x, hidden)
+        return self.gru(x, hidden)

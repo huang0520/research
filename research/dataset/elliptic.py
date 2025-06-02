@@ -2,11 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import override
 
-import dgl
-import numpy as np
-import pandas as pd
 import polars as pl
-from dgl.data.graph_serialize import load_graphs
 from polars import selectors as cs
 from torch_geometric.data import Data
 
@@ -31,12 +27,10 @@ class EllipticTxTx(BaseDataset):
         self,
         root: str = "./data/elliptic-txtx",
         force_reload: bool = False,
-        life: int = 2,
     ) -> None:
         self.raw_edge_file_name = "txs_edgelist.csv"
         self.raw_feat_file_name = "txs_features.csv"
         self.raw_label_file_name = "txs_classes.csv"
-        self.life = life
         super().__init__(root=root, force_reload=force_reload)
         self.load(self.processed_paths[0])
         self._data = self._data.pin_memory()
@@ -119,101 +113,3 @@ class EllipticTxTx(BaseDataset):
     @override
     def processed_file_names(self) -> str:
         return "data.pt"
-
-
-class EllipticTxTx_(BaseDataset):
-    def __init__(self, save_dir="./data", force_reload=False):
-        self._edge_id = GoogleFileID.tx_tx_edges
-        self._node_feature_id = GoogleFileID.tx_features
-        self._node_label_id = GoogleFileID.tx_classes
-
-        super().__init__(
-            name="eplliptic-txtx", raw_dir=save_dir, force_reload=force_reload
-        )
-
-    def process(self):
-        df_edges = pd.read_csv(self.raw_edge_path)
-        df_node_features = pd.read_csv(self.raw_node_feature_path)
-        df_node_label = pd.read_csv(self.raw_node_label_path)
-
-        # Reset node id
-        node_id2new_id = {
-            node_id: i for i, node_id in enumerate(df_node_label["txId"].sort_values())
-        }
-        df_edges["txId1"] = df_edges["txId1"].map(node_id2new_id)
-        df_edges["txId2"] = df_edges["txId2"].map(node_id2new_id)
-        df_node_features["txId"] = df_node_features["txId"].map(node_id2new_id)
-        df_node_label["txId"] = df_node_label["txId"].map(node_id2new_id)
-
-        df_node_features = df_node_features.set_index("txId")
-        df_node_label = df_node_label.set_index("txId")
-
-        # Extract feature & label
-        df_node_features = df_node_features.sort_index()
-        node_features = torch.tensor(
-            df_node_features.loc[:, "Local_feature_1":].to_numpy()
-        )
-        df_node_label = df_node_label.sort_index()
-        node_label = torch.tensor(df_node_label.to_numpy())
-
-        # Extract snapshot mask
-        self._snapshot_masks = torch.tensor(
-            np.array([
-                np.array(df_node_features["Time step"] == step)
-                for step in range(
-                    df_node_features["Time step"].min(),  # type:ignore
-                    df_node_features["Time step"].max() + 1,  # type:ignore
-                )
-            ])
-        )
-
-        # Create graph
-        src, dst = df_edges.to_numpy().transpose()
-        self._graph = dgl.graph((src, dst))
-        self._graph.ndata["feature"] = node_features
-        self._graph.ndata["label"] = node_label
-
-    def download(self):
-        download_google(self._edge_id, self.raw_edge_path)
-        download_google(self._node_feature_id, self.raw_node_feature_path)
-        download_google(self._node_label_id, self.raw_node_label_path)
-
-    def load(self):
-        self._snapshot_masks = torch.load(self.snapshot_masks_path, weights_only=True)
-        glist, _ = load_graphs(str(self.save_path), [0])
-        self._graph = glist[0]
-
-    def _download(self):
-        if (
-            self.raw_edge_path.exists()
-            and self.raw_node_feature_path.exists()
-            and self.raw_node_label_path.exists()
-        ):
-            return
-
-        self.raw_dir.mkdir(exist_ok=True)
-        self.download()
-
-    def __getitem__(self, idx):
-        return dgl.node_subgraph(
-            self.graph, self.snapshot_masks[idx], relabel_nodes=False
-        )
-
-    @property
-    def raw_edge_path(self):
-        return self.raw_dir / "txs_edgelist.csv"
-
-    @property
-    def raw_node_feature_path(self):
-        return self.raw_dir / "txs_features.csv"
-
-    @property
-    def raw_node_label_path(self):
-        return self.raw_dir / "txs_classes.csv"
-
-
-if __name__ == "__main__":
-    from dgl.dataloading import GraphDataLoader
-
-    dataset = EllipticTxTx()
-    dataloader = GraphDataLoader(dataset)

@@ -49,9 +49,9 @@ class CacheableGCNConv(GCNConv, CacheableMixin):
                     x.dtype,
                 )
 
-        # x = self.lin(x)
+        x = self.lin(x)
         if compute_eid is None or compute_eid.size(0) == edge_index.size(1):
-            return self.propagate(edge_index, x=x, edge_weight=edge_weight)
+            out = self.propagate(edge_index, x=x, edge_weight=edge_weight)
         else:
             # TODO: Allow sparse tensor
             assert isinstance(edge_index, Tensor)
@@ -61,7 +61,11 @@ class CacheableGCNConv(GCNConv, CacheableMixin):
             out[dst_nid] = self.propagate(
                 filtered_edge_index, x=x, edge_weight=edge_weight
             )[dst_nid]
-            return out
+
+        if self.bias is not None:
+            out += self.bias
+
+        return out
 
     @override
     def compute_update(self, x: Tensor) -> Tensor:
