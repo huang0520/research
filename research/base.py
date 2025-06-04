@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+import torch as th
 from torch import Tensor
 from torch_geometric.data import Data
 from torch_geometric.utils.map import map_index
@@ -158,6 +159,7 @@ class SnapshotContext:
         self.prev_data = self.curr_data.clone() if self.curr_data is not None else None
         self.prev_agg = self.curr_agg
         self.curr_agg = {}
+
         self._diff = None
 
     def reset_state(self):

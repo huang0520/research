@@ -12,7 +12,7 @@ EDGE_URL = "https://snap.stanford.edu/data/soc-redditHyperlinks-body.tsv"
 NODE_URL = "https://snap.stanford.edu/data/web-redditEmbeddings-subreddits.csv"
 
 
-class RedditBodyDataset(BaseDataset):
+class RedditBody(BaseDataset):
     @override
     def __init__(
         self,

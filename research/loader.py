@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 import torch as th
+from torch.utils.data import DataLoader
 from torch_geometric.utils import mask_to_index
 from torch_geometric.utils.map import map_index
 
@@ -92,6 +93,9 @@ class SnapshotManager:
         """
         assert context.curr_data is not None
 
+        total_n_nodes = context.curr_data.gnid.size(0) + diff_info.add_gnid.size(0)
+        total_n_edges = context.curr_data.geid.size(0) + diff_info.add_geid.size(0)
+
         add_x = context.main_data.x[diff_info.add_gnid].to(
             context.device, non_blocking=True
         )
@@ -103,10 +107,31 @@ class SnapshotManager:
         rev_curr_edge_index = context.curr_data.gnid[context.curr_data.edge_index]
 
         # Combine current snapshot and new part (to orig nid)
-        nid = th.cat((context.curr_data.gnid, diff_info.add_gnid.to(context.device)))
-        eid = th.cat((context.curr_data.geid, diff_info.add_geid.to(context.device)))
-        x = th.cat((context.curr_data.x, add_x))
-        edge_index = th.cat((rev_curr_edge_index, add_edge_index), dim=1)
+        nid = th.empty(
+            total_n_nodes, device=context.device, dtype=context.curr_data.gnid.dtype
+        )
+        nid[: context.curr_data.gnid.size(0)] = context.curr_data.gnid
+        nid[context.curr_data.gnid.size(0) :] = diff_info.add_gnid.to(context.device)
+
+        eid = th.empty(
+            total_n_edges, device=context.device, dtype=context.curr_data.geid.dtype
+        )
+        eid[: context.curr_data.geid.size(0)] = context.curr_data.geid
+        eid[context.curr_data.geid.size(0) :] = diff_info.add_geid.to(context.device)
+
+        x = th.empty(
+            (total_n_nodes, context.curr_data.x.size(-1)),
+            device=context.device,
+            dtype=context.curr_data.x.dtype,
+        )
+        x[: context.curr_data.gnid.size(0), :] = context.curr_data.x
+        x[context.curr_data.gnid.size(0) :, :] = add_x
+
+        edge_index = th.empty(
+            (2, total_n_edges), device=context.device, dtype=rev_curr_edge_index.dtype
+        )
+        edge_index[:, : context.curr_data.geid.size(0)] = rev_curr_edge_index
+        edge_index[:, context.curr_data.geid.size(0) :] = add_edge_index
 
         # Update cache snapshot
         context.curr_data.gnid = nid
