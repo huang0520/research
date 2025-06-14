@@ -9,7 +9,6 @@ from torch_geometric.utils import index_to_mask, mask_to_index
 from torch_geometric.utils.map import map_index
 
 from research.base import SnapshotContext
-from research.loader import SnapshotManager
 
 
 def is_cacheable_module(obj: object) -> TypeGuard["CacheableModule"]:

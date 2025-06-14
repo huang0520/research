@@ -7,8 +7,7 @@ from torch_geometric.data.hetero_data import HeteroData
 from torch_geometric.typing import EdgeType, NodeOrEdgeType, NodeType
 from torch_geometric.utils.mask import mask_to_index
 
-from research.base import SnapshotContext, SnapshotDiffInfo, SnapshotMetadata, SubData
-from research.utils.subgraph import edge_subgraph
+from research.base import SnapshotDiffInfo, SnapshotMetadata
 
 
 @dataclass(slots=True, frozen=True)
