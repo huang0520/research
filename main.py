@@ -5,6 +5,7 @@ import torch as th
 from torch import nn
 from torch.autograd import profiler
 from torch.cuda import synchronize
+from torch.utils.data.dataloader import DataLoader
 from torch_geometric.nn.conv.gcn_conv import GCNConv
 
 from research.base import SnapshotContext
@@ -14,12 +15,14 @@ from research.compute.cache_manager import (
     create_cached_model,
 )
 from research.dataset import EllipticTxTx, Epinions, RedditBody
-from research.loader import SnapshotManager
+from research.dataset.base import TransferPackage
+from research.loader import AsyncPipeline, SnapshotManager
 from research.model import TGCN
 from research.model.layer.gcn import CacheableGCNConv
 from research.transform import edge_life
 from research.utils import edge_subgraph
 
+th.backends.cudnn.enabled = True
 th.backends.cudnn.benchmark = True
 
 # dataset = EllipticTxTx()
@@ -349,16 +352,18 @@ class DetailedProfiler:
             # Warmup
             for _ in range(2):
                 hn = None
-                for _, snapshot in self.manager.get_generator():
-                    # _, hn = self.cached_model(snapshot.x, snapshot.edge_index, hn)
-                    _, hn = self.model(snapshot.x, snapshot.edge_index, hn)
+                with th.no_grad():
+                    for _, snapshot in self.manager.get_generator():
+                        # _, hn = self.cached_model(snapshot.x, snapshot.edge_index, hn)
+                        _, hn = self.model(snapshot.x, snapshot.edge_index, hn)
 
         synchronize()
         start = time.perf_counter()
         hn = None
-        for _, snapshot in self.manager.get_generator():
-            # _, hn = self.cached_model(snapshot.x, snapshot.edge_index, hn)
-            _, hn = self.model(snapshot.x, snapshot.edge_index, hn)
+        with th.no_grad():
+            for _, snapshot in self.manager.get_generator():
+                _, hn = self.cached_model(snapshot.x, snapshot.edge_index, hn)
+                # _, hn = self.model(snapshot.x, snapshot.edge_index, hn)
         synchronize()
         end = time.perf_counter()
         return end - start
@@ -393,20 +398,41 @@ class DetailedProfiler:
         return baseline_times, incremental_times
 
 
+def collect_fn(batch):
+    assert len(batch) == 1
+    return batch[0]
+
+
 # Usage in your main.py:
 def run_detailed_profiling():
     # Your existing setup code here...
     dataset = EllipticTxTx()
-    dataset = edge_life(dataset, life=5)
+    dataset = edge_life(dataset, life=2)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=2,
+        prefetch_factor=2,
+        collate_fn=collect_fn,
+        pin_memory=True,
+    )
+    pipeline = AsyncPipeline(dataloader, "cuda")
 
-    context = SnapshotContext(dataset._data)
-    manager = SnapshotManager(context)
     model = TGCN(182, 3, 100, gcn_norm=False).to("cuda")
 
-    for id, (nmask, emask) in enumerate(
-        zip(dataset._data.nmasks, dataset._data.emasks)
-    ):
-        manager.register_snapshot(id, nmask, emask)
+    for id, data in pipeline:
+        print(id)
+        hidden = None
+        with th.cuda.stream(pipeline.compute_stream):  # type:ignore
+            with th.no_grad():
+                _, hidden = model(
+                    data["node"]["x"],
+                    data["node", "edge", "node"]["edge_index"],
+                    hidden,
+                )
+
+    breakpoint()
 
     cached_model = create_cached_model(model, context)
 

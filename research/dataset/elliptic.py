@@ -4,7 +4,7 @@ from typing import override
 
 import polars as pl
 from polars import selectors as cs
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from research.dataset.base import BaseDataset
 from research.utils import download_google
@@ -33,7 +33,7 @@ class EllipticTxTx(BaseDataset):
         self.raw_label_file_name = "txs_classes.csv"
         super().__init__(root=root, force_reload=force_reload)
         self.load(self.processed_paths[0])
-        self._data = self._data.pin_memory()
+        self._reset_cache()
 
     @override
     def process(self) -> None:
@@ -77,10 +77,13 @@ class EllipticTxTx(BaseDataset):
         nmasks = df_feats.select(cs.starts_with("mask")).to_torch().T
         emasks = df_edges.select(cs.starts_with("mask")).to_torch().T
 
-        data_list = [
-            # snapshot for snapshot in self.edge_life(feats, edges, nmask, emask)
-            Data(x=feats, edge_index=edges, nmasks=nmasks, emasks=emasks)
-        ]
+        data = HeteroData()
+        data["node"].x = feats
+        data["node"].mask = nmasks
+        data["node", "edge", "node"].edge_index = edges
+        data["node", "edge", "node"].mask = emasks
+
+        data_list = [data]
 
         if self.pre_filter is not None:
             data_list = [data for data in data_list if self.pre_filter(data)]
@@ -113,3 +116,7 @@ class EllipticTxTx(BaseDataset):
     @override
     def processed_file_names(self) -> str:
         return "data.pt"
+
+
+if __name__ == "__main__":
+    EllipticTxTx(force_reload=True)

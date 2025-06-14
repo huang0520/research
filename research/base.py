@@ -4,10 +4,19 @@ from typing import Literal
 import torch as th
 from torch import Tensor
 from torch_geometric.data import Data
+from torch_geometric.data.hetero_data import HeteroData
+from torch_geometric.typing import EdgeType, NodeType
 from torch_geometric.utils.map import map_index
 
+MainData = HeteroData
 
-class SubData(Data):
+
+class SubData:
+    def __init__(self, data: HeteroData):
+        self._data = data
+
+
+class SubData_(Data):
     x: Tensor
     edge_index: Tensor
     gnid: Tensor
@@ -28,78 +37,25 @@ class SubData(Data):
         return id[lid]
 
 
-class MainData(Data):
-    x: Tensor
-    edge_index: Tensor
-    nmasks: Tensor
-    emasks: Tensor
-
-
 @dataclass
 class SnapshotMetadata:
     id: int
-    gnid: Tensor
-    geid: Tensor
-    nmask: Tensor
-    emask: Tensor
+    gids: dict[NodeType | EdgeType, Tensor]
+    masks: dict[NodeType | EdgeType, Tensor]
+    ntype: list[NodeType]
+    etype: list[EdgeType]
 
 
-@dataclass
+@dataclass(frozen=True)
 class SnapshotDiffInfo:
-    src_id: int
-    dst_id: int
-
-    add_nmask: Tensor
-    rm_nmask: Tensor
-    keep_nmask: Tensor
-
-    add_emask: Tensor
-    rm_emask: Tensor
-    keep_emask: Tensor
-
-    _add_gnid: Tensor | None = None
-    _rm_gnid: Tensor | None = None
-    _keep_gnid: Tensor | None = None
-
-    _add_geid: Tensor | None = None
-    _rm_geid: Tensor | None = None
-    _keep_geid: Tensor | None = None
-
-    @property
-    def add_gnid(self):
-        if self._add_gnid is None:
-            self._add_gnid = self.add_nmask.nonzero().view(-1)
-        return self._add_gnid
-
-    @property
-    def rm_gnid(self):
-        if self._rm_gnid is None:
-            self._rm_gnid = self.rm_nmask.nonzero().view(-1)
-        return self._rm_gnid
-
-    @property
-    def keep_gnid(self):
-        if self._keep_gnid is None:
-            self._keep_gnid = self.keep_nmask.nonzero().view(-1)
-        return self._keep_gnid
-
-    @property
-    def add_geid(self):
-        if self._add_geid is None:
-            self._add_geid = self.add_emask.nonzero().view(-1)
-        return self._add_geid
-
-    @property
-    def rm_geid(self):
-        if self._rm_geid is None:
-            self._rm_geid = self.rm_emask.nonzero().view(-1)
-        return self._rm_geid
-
-    @property
-    def keep_geid(self):
-        if self._keep_geid is None:
-            self._keep_geid = self.keep_emask.nonzero().view(-1)
-        return self._keep_geid
+    prev_id: int
+    curr_id: int
+    add_masks: dict[NodeType | EdgeType, Tensor]
+    rm_masks: dict[NodeType | EdgeType, Tensor]
+    keep_masks: dict[NodeType | EdgeType, Tensor]
+    add_gids: dict[NodeType | EdgeType, Tensor]
+    rm_gids: dict[NodeType | EdgeType, Tensor]
+    keep_gids: dict[NodeType | EdgeType, Tensor]
 
 
 @dataclass

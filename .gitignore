@@ -8,3 +8,4 @@ __pycache__/
 output/
 /data/
 tmp/
+incremental_trace.json

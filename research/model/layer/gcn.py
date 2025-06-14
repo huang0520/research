@@ -49,7 +49,6 @@ class CacheableGCNConv(GCNConv, CacheableMixin):
                     x.dtype,
                 )
 
-        x = self.lin(x)
         if compute_eid is None or compute_eid.size(0) == edge_index.size(1):
             out = self.propagate(edge_index, x=x, edge_weight=edge_weight)
         else:
@@ -62,6 +61,7 @@ class CacheableGCNConv(GCNConv, CacheableMixin):
                 filtered_edge_index, x=x, edge_weight=edge_weight
             )[dst_nid]
 
+        x = self.lin(x)
         if self.bias is not None:
             out += self.bias
 

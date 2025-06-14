@@ -24,6 +24,7 @@ class Epinions(BaseDataset):
         super().__init__(root=root, force_reload=force_reload)
         self.load(self.processed_paths[0])
         self._data = self._data.pin_memory()
+        self._reset_cache()
 
     @override
     def process(self):
