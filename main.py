@@ -20,7 +20,7 @@ from research.transform import edge_life
 from research.utils import edge_subgraph
 
 th.backends.cudnn.enabled = True
-th.backends.cudnn.benchmark = True
+th.backends.cudnn.benchmark = False
 
 
 class DetailedProfiler:
@@ -293,11 +293,6 @@ class DetailedProfiler:
         return baseline_times, incremental_times
 
 
-def collect_fn(batch):
-    assert len(batch) == 1
-    return batch[0]
-
-
 def main():
     # Your existing setup code here...
     dataset = EllipticTxTx()
@@ -308,27 +303,28 @@ def main():
         shuffle=False,
         num_workers=2,
         prefetch_factor=2,
-        collate_fn=collect_fn,
+        collate_fn=lambda batch: batch[0],
         pin_memory=True,
     )
     pipeline = AsyncPipeline(dataloader, "cuda")
+    pipeline.compose_stream = pipeline.compute_stream
 
     model = TGCN(182, 3, 100, gcn_norm=False).to("cuda")
-    layer = GCNConv(182, 3, normalize=False).to("cuda")
 
+    hidden = None
     for id, data in pipeline:
         print(id)
-        hidden = None
         with th.cuda.stream(pipeline.compute_stream):  # type:ignore
-            with th.no_grad():
-                _, hidden = model(
-                    data["node"]["x"],
-                    data["node", "edge", "node"]["edge_index"],
-                    hidden,
-                )
+            with th.amp.autocast("cuda"):  # type:ignore
+                with th.no_grad():
+                    _, hidden = model(
+                        data["node"]["x"],
+                        data["node", "edge", "node"]["edge_index"],
+                        hidden,
+                    )
 
     breakpoint()
 
 
 if __name__ == "__main__":
-    run_detailed_profiling()
+    main()

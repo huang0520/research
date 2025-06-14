@@ -69,7 +69,7 @@ class PipelinedIterator:
 
         self.package_queue: Queue[
             tuple[TransferPackage | Exception | None, th.cuda.Event | None]
-        ] = Queue(maxsize=1)
+        ] = Queue(maxsize=2)
         self.data_queue: Queue[
             tuple[int | Exception | None, HeteroData | None, th.cuda.Event | None]
         ] = Queue(maxsize=1)
@@ -95,7 +95,7 @@ class PipelinedIterator:
             and isinstance(compose_event, th.cuda.Event)
         )
 
-        self.compute_stream.wait_event(compose_event)
+        self.compute_stream.wait_event(compose_event)  # type:ignore
         return id, data
 
     def _start_loading_thread(self, dataloader_iter: Iterator):
@@ -142,11 +142,10 @@ class PipelinedIterator:
                         self.compose_stream.wait_event(transfer_event)  # type:ignore
 
                         id, data = self.compose_fn(package, self.prev_data)
+                        self.prev_data = data.clone()
 
                         compose_event = th.cuda.Event()
                         compose_event.record(self.compose_stream)
-
-                        self.prev_data = data.clone()
 
                     self.data_queue.put((id, data, compose_event))  # type: ignore
 
@@ -183,37 +182,32 @@ class PackageProcessor:
     def _process_incremental_package(
         self, package: TransferPackage, prev_data: HeteroData
     ):
-        all_types = (*prev_data.node_types, *prev_data.edge_types)
-
         # Reverse src, dst local nid of edge index to global nid
         global_edge_index = self._map_edge_index_to_global(prev_data)
 
         # Update data
         data = HeteroData()
-        for t in all_types:
-            data[t]["gid"] = package.new_gids[t]
-
-            if isinstance(t, NodeType):
-                data[t]["x"] = th.cat((
-                    prev_data[t]["x"][package.keep_prev_lids[t]],
-                    package.add_xs[t],
-                ))
-
-            if isinstance(t, tuple):
-                data[t]["edge_index"] = th.cat(
-                    (
-                        global_edge_index[:, package.keep_prev_lids[t]],
-                        package.add_edge_indexes[t],
-                    ),
-                    dim=1,
-                )
-                data[t]["edge_index"] = self._map_edge_index_to_local(data)
-
-            if isinstance(t, tuple) and package.add_edge_attrs:
-                data[t]["edge_attr"] = th.cat((
-                    prev_data[t]["edge_attr"][package.keep_prev_lids[t]],
-                    package.add_edge_attrs[t],
-                ))
+        for t, gid in package.new_gids.items():
+            data[t]["gid"] = gid
+        for t, x in package.add_xs.items():
+            data[t]["x"] = th.cat((
+                prev_data[t]["x"][package.keep_prev_lids[t]],
+                x,
+            ))
+        for t, edge_index in package.add_edge_indexes.items():
+            data[t]["edge_index"] = th.cat(
+                (
+                    global_edge_index[:, package.keep_prev_lids[t]],
+                    edge_index,
+                ),
+                dim=1,
+            )
+            data[t]["edge_index"] = self._map_edge_index_to_local(data)
+        for t, edge_attr in package.add_edge_attrs.items():
+            data[t]["edge_attr"] = th.cat((
+                prev_data[t]["edge_attr"][package.keep_prev_lids[t]],
+                edge_attr,
+            ))
 
         data = data.contiguous()
         return package.curr_id, data

@@ -35,7 +35,6 @@ class TGCN(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         if hidden is None:
             hidden = self.initial_hidden
-            self.gru.flatten_parameters()
 
         x = self.gconv(x, edge_index)
         x = x.view([1, *x.shape])
