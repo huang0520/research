@@ -6,18 +6,9 @@ import torch as th
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torch_geometric.data.hetero_data import HeteroData
-from torch_geometric.typing import EdgeType, NodeOrEdgeType, NodeType
-from torch_geometric.utils import mask_to_index
 from torch_geometric.utils.map import map_index
 
-from research.base import (
-    SnapshotContext,
-    SnapshotDiffInfo,
-    SnapshotMetadata,
-    SubData,
-)
-from research.dataset.base import TransferPackage
-from research.utils import edge_subgraph
+from research.dataset.base import ComputeInfo, TransferPackage
 
 
 class AsyncPipeline:
@@ -47,7 +38,7 @@ class AsyncPipeline:
 
 
 class PipelinedIterator:
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         dataloader_iter: Iterator,
         transfer_stream: th.cuda.Stream,
@@ -71,8 +62,13 @@ class PipelinedIterator:
             tuple[TransferPackage | Exception | None, th.cuda.Event | None]
         ] = Queue(maxsize=2)
         self.data_queue: Queue[
-            tuple[int | Exception | None, HeteroData | None, th.cuda.Event | None]
-        ] = Queue(maxsize=1)
+            tuple[
+                int | Exception | None,
+                HeteroData | None,
+                ComputeInfo | None,
+                th.cuda.Event | None,
+            ]
+        ] = Queue(maxsize=2)
 
         self._start_loading_thread(self.dataloader_iter)
         self._start_compose_thread()
@@ -88,7 +84,7 @@ class PipelinedIterator:
             self.stop_threads.set()
             raise item[0]
 
-        id, data, compose_event = item
+        id, data, compute_info, compose_event = item
         assert (
             isinstance(id, int)
             and isinstance(data, HeteroData)
@@ -96,7 +92,7 @@ class PipelinedIterator:
         )
 
         self.compute_stream.wait_event(compose_event)  # type:ignore
-        return id, data
+        return id, data, compute_info
 
     def _start_loading_thread(self, dataloader_iter: Iterator):
         def worker():
@@ -127,10 +123,10 @@ class PipelinedIterator:
                     item = self.package_queue.get()
 
                     if item[0] is None:
-                        self.data_queue.put((None, None, None))
+                        self.data_queue.put((None, None, None, None))
                         break
                     elif isinstance(item[0], Exception):
-                        self.data_queue.put((item[0], None, None))
+                        self.data_queue.put((item[0], None, None, None))
                         break
 
                     package, transfer_event = item
@@ -147,10 +143,10 @@ class PipelinedIterator:
                         compose_event = th.cuda.Event()
                         compose_event.record(self.compose_stream)
 
-                    self.data_queue.put((id, data, compose_event))  # type: ignore
+                    self.data_queue.put((id, data, package.compute_info, compose_event))  # type: ignore
 
             except Exception as e:
-                self.data_queue.put((e, None, None))
+                self.data_queue.put((e, None, None, None))
 
         self.compose_thread = Thread(target=worker, daemon=True)
         self.compose_thread.start()

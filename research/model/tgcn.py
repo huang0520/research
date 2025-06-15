@@ -1,7 +1,8 @@
 import torch as th
 from torch import Tensor, nn
+from torch_geometric.nn.conv.gcn_conv import GCNConv
 
-from research.model.layer import CacheableGCNConv
+from research.dataset.base import ComputeInfo
 
 
 class TGCN(nn.Module):
@@ -14,11 +15,11 @@ class TGCN(nn.Module):
         gcn_bias: bool = True,
         rnn_n_layer: int = 1,
         rnn_bias: bool = True,
+        cache_gconv: bool = False,
+        max_nodes: int = 0,
     ):
         super().__init__()
-        self.gconv = CacheableGCNConv(
-            gcn_in, gcn_out, normalize=gcn_norm, bias=gcn_bias
-        )
+        self.gconv = GCNConv(gcn_in, gcn_out, normalize=gcn_norm, bias=gcn_bias)
         self.gru = nn.GRU(
             input_size=gcn_out,
             hidden_size=rnn_hidden,
@@ -30,12 +31,47 @@ class TGCN(nn.Module):
         h0 = th.randn((rnn_n_layer, 1, rnn_hidden))
         self.register_buffer("initial_hidden", h0)
 
+        self.cache_gconv = cache_gconv
+        self.max_nodes = max_nodes
+        if cache_gconv and max_nodes:
+            self.register_buffer("gconv_cache", th.zeros(max_nodes, gcn_out))
+            self.cache_valid = False
+        else:
+            self.gconv_cache: Tensor | None = None
+            self.cache_valid = False
+
     def forward(
-        self, x: Tensor, edge_index: Tensor, hidden=None
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        hidden: Tensor | None = None,
+        compute_info: ComputeInfo | None = None,
     ) -> tuple[Tensor, Tensor]:
         if hidden is None:
             hidden = self.initial_hidden
 
-        x = self.gconv(x, edge_index)
+        if (
+            self.cache_gconv
+            and self.cache_valid
+            and compute_info is not None
+            and len(compute_info.compute_leids) != 0
+        ):
+            edge_index_ = edge_index[:, compute_info.compute_leids]
+            x = self.gconv(x, edge_index_)
+
+            if len(compute_info.keep_curr_lrid) != 0:
+                x[compute_info.keep_curr_lrid] = self.gconv_cache[
+                    compute_info.keep_prev_lrid
+                ]
+        else:
+            x = self.gconv(x, edge_index)
+
+        if self.cache_gconv:
+            if self.max_nodes:
+                self.gconv_cache[: x.size(0)].copy_(x)
+            else:
+                self.gconv_cache.clone()
+            self.cache_valid = True
+
         x = x.view([1, *x.shape])
         return self.gru(x, hidden)

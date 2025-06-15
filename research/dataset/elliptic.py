@@ -23,15 +23,23 @@ class GoogleFileID:
 
 
 class EllipticTxTx(BaseDataset):
+    @override
     def __init__(
         self,
         root: str = "./data/elliptic-txtx",
         force_reload: bool = False,
+        incremental: bool = True,
+        incremental_threshold: float = 0.2,
     ) -> None:
         self.raw_edge_file_name = "txs_edgelist.csv"
         self.raw_feat_file_name = "txs_features.csv"
         self.raw_label_file_name = "txs_classes.csv"
-        super().__init__(root=root, force_reload=force_reload)
+        super().__init__(
+            root=root,
+            force_reload=force_reload,
+            incremental=incremental,
+            incremental_threshold=incremental_threshold,
+        )
         self.load(self.processed_paths[0])
         self._reset_cache()
 
@@ -78,10 +86,10 @@ class EllipticTxTx(BaseDataset):
         emasks = df_edges.select(cs.starts_with("mask")).to_torch().T
 
         data = HeteroData()
-        data["node"].x = feats
-        data["node"].mask = nmasks
-        data["node", "edge", "node"].edge_index = edges
-        data["node", "edge", "node"].mask = emasks
+        data["n"].x = feats
+        data["n"].mask = nmasks
+        data["n", "e", "n"].edge_index = edges
+        data["n", "e", "n"].mask = emasks
 
         data_list = [data]
 

@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import override
 
 import torch as th
 from torch import Tensor
@@ -11,33 +12,51 @@ from research.base import SnapshotDiffInfo, SnapshotMetadata
 
 
 @dataclass(slots=True, frozen=True)
+class ComputeInfo:
+    compute_leids: Tensor = field(default=th.empty(0))
+    keep_curr_lrid: Tensor = field(default=th.empty(0))
+    keep_prev_lrid: Tensor = field(default=th.empty(0))
+
+    def to(self, device: str):
+        return ComputeInfo(
+            compute_leids=self.compute_leids.to(device, non_blocking=True),
+            keep_curr_lrid=self.keep_curr_lrid.to(device, non_blocking=True),
+            keep_prev_lrid=self.keep_prev_lrid.to(device, non_blocking=True),
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class TransferPackage:
     curr_id: int
     new_gids: dict[NodeOrEdgeType, Tensor]
     add_xs: dict[NodeType, Tensor]
     add_edge_indexes: dict[EdgeType, Tensor]
-    keep_prev_lids: dict[NodeOrEdgeType, Tensor]
     add_edge_attrs: dict[EdgeType, Tensor]
+    keep_prev_lids: dict[NodeOrEdgeType, Tensor]
+    compute_info: ComputeInfo
     is_first: bool = False
 
-    def to(self, device: "str"):
+    def to(self, device: str):
         return TransferPackage(
-            self.curr_id,
-            {k: v.to(device, non_blocking=True) for k, v in self.new_gids.items()},
-            {k: v.to(device, non_blocking=True) for k, v in self.add_xs.items()},
-            {
+            curr_id=self.curr_id,
+            new_gids={
+                k: v.to(device, non_blocking=True) for k, v in self.new_gids.items()
+            },
+            add_xs={k: v.to(device, non_blocking=True) for k, v in self.add_xs.items()},
+            add_edge_indexes={
                 k: v.to(device, non_blocking=True)
                 for k, v in self.add_edge_indexes.items()
             },
-            {
-                k: v.to(device, non_blocking=True)
-                for k, v in self.keep_prev_lids.items()
-            },
-            {
+            add_edge_attrs={
                 k: v.to(device, non_blocking=True)
                 for k, v in self.add_edge_attrs.items()
             },
-            self.is_first,
+            keep_prev_lids={
+                k: v.to(device, non_blocking=True)
+                for k, v in self.keep_prev_lids.items()
+            },
+            compute_info=self.compute_info.to(device),
+            is_first=self.is_first,
         )
 
 
@@ -48,6 +67,14 @@ class BaseDataset(InMemoryDataset):
     _packages: dict[int, TransferPackage]
     _reordered_gids: dict[int, dict[NodeOrEdgeType, Tensor]]
     snapshot_ids: list[int]
+
+    @override
+    def __init__(
+        self, incremental: bool, incremental_threshold: float = 0.2, *args, **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self._incremental = incremental
+        self._incremental_threshold = incremental_threshold
 
     def _reset_cache(self):
         assert hasattr(self, "_data")
@@ -78,31 +105,42 @@ class BaseDataset(InMemoryDataset):
         return self._packages[idx]
 
     def _create_package(self, idx: int):
-        meta = self._metadata[idx]
-        if idx == 0:
-            self._reordered_gids[idx] = {
-                t: meta.gids[t]
-                for t in (*self._data.node_types, *self._data.edge_types)
-            }
-            self._packages[idx] = TransferPackage(
-                0,
-                self._reordered_gids[idx],
-                {t: self._data[t]["x"][meta.gids[t]] for t in self._data.node_types},
-                {
-                    t: self._data[t]["edge_index"][:, meta.gids[t]]
-                    for t in self._data.edge_types
-                },
-                {},
-                {
-                    t: self._data[t]["edge_attr"][meta.gids[t]]
-                    for t in self._data.edge_types
-                }
-                if "edge_attr" in self._data
-                else {},
-                True,
-            )
-            return
+        if not self._incremental:
+            self._create_normal_package(idx)
+            return self._packages[idx]
 
+        if idx == 0:
+            self._create_normal_package(idx)
+        else:
+            self._create_incremental_package(idx)
+
+        return self._packages[idx]
+
+    def _create_normal_package(self, idx: int):
+        meta = self._metadata[idx]
+        self._reordered_gids[idx] = {
+            t: meta.gids[t] for t in (*self._data.node_types, *self._data.edge_types)
+        }
+        self._packages[idx] = TransferPackage(
+            curr_id=0,
+            new_gids=self._reordered_gids[idx],
+            add_xs={t: self._data[t]["x"][meta.gids[t]] for t in self._data.node_types},
+            add_edge_indexes={
+                t: self._data[t]["edge_index"][:, meta.gids[t]]
+                for t in self._data.edge_types
+            },
+            add_edge_attrs={
+                t: self._data[t]["edge_attr"][meta.gids[t]]
+                for t in self._data.edge_types
+            }
+            if "edge_attr" in self._data
+            else {},
+            keep_prev_lids={},
+            compute_info=ComputeInfo(),
+            is_first=True,
+        )
+
+    def _create_incremental_package(self, idx: int):
         diff = self._diffs[idx]
         types = (*self._data.node_types, *self._data.edge_types)
 
@@ -139,14 +177,62 @@ class BaseDataset(InMemoryDataset):
             )).contiguous()
             for t in types
         }
+
+        # Compute Info
+        compute_leids, keep_curr_lrid, keep_prev_lrid = self._create_compute_info(idx)
+        if (
+            len(compute_leids)
+            / len(self._reordered_gids[idx][self._data.edge_types[0]])
+            <= self._incremental_threshold
+        ):
+            compute_info = ComputeInfo()
+        else:
+            compute_info = ComputeInfo(
+                compute_leids=compute_leids,
+                keep_curr_lrid=keep_curr_lrid,
+                keep_prev_lrid=keep_prev_lrid,
+            )
+
         self._packages[idx] = TransferPackage(
-            idx,
-            self._reordered_gids[idx],
-            add_xs,
-            add_edge_indexes,
-            keep_prev_lids,
-            add_edge_attrs,
+            curr_id=idx,
+            new_gids=self._reordered_gids[idx],
+            add_xs=add_xs,
+            add_edge_indexes=add_edge_indexes,
+            add_edge_attrs=add_edge_attrs,
+            keep_prev_lids=keep_prev_lids,
+            compute_info=compute_info,
         )
+
+    def _create_compute_info(self, idx: int):
+        assert len(self._data.edge_types) == 1
+        t = self._data.edge_types[0]
+
+        diff = self._diffs[idx]
+        change_emask = diff.add_masks[t] | diff.rm_masks[t]
+
+        target_gnid: Tensor = self._data[t]["edge_index"][1, change_emask]
+
+        curr_geid = self._reordered_gids[idx][t]
+        curr_edge_index: Tensor = self._data[t]["edge_index"][:, curr_geid]
+
+        # Find in edge of target dst
+        lookup: Tensor = th.zeros(self._data.num_nodes, dtype=th.bool)  # type:ignore
+        lookup[target_gnid] = True
+
+        compute_leid = mask_to_index(lookup[curr_edge_index[1]])
+
+        # Find non-computed lid of result
+        curr_dst_gnid = self._reordered_gids[idx][t[2]]
+        prev_dst_gnid = self._reordered_gids[idx - 1][t[2]]
+
+        lookup = diff.keep_masks[t[2]].clone()
+        lookup[curr_edge_index[1, compute_leid]] = False
+
+        unaffected_curr_lrid = mask_to_index(lookup[curr_dst_gnid])
+        unaffected_prev_lrid = mask_to_index(lookup[prev_dst_gnid])
+
+        assert unaffected_curr_lrid.shape == unaffected_prev_lrid.shape
+        return compute_leid, unaffected_curr_lrid, unaffected_prev_lrid
 
     def _compute_diff(self, idx: int) -> SnapshotDiffInfo:
         if idx == 0:
