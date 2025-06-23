@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import override
 
@@ -7,6 +8,7 @@ from polars import selectors as cs
 from torch_geometric.data import Data, HeteroData
 
 from research.dataset.base import BaseDataset
+from research.transform.edge_life import edge_life
 from research.utils import download_google
 
 
@@ -30,6 +32,8 @@ class EllipticTxTx(BaseDataset):
         force_reload: bool = False,
         incremental: bool = True,
         incremental_threshold: float = 0.2,
+        only_edge: bool = False,
+        **kwargs,
     ) -> None:
         self.raw_edge_file_name = "txs_edgelist.csv"
         self.raw_feat_file_name = "txs_features.csv"
@@ -39,6 +43,8 @@ class EllipticTxTx(BaseDataset):
             force_reload=force_reload,
             incremental=incremental,
             incremental_threshold=incremental_threshold,
+            only_edge=only_edge,
+            **kwargs,
         )
         self.load(self.processed_paths[0])
         self._reset_cache()
@@ -127,4 +133,5 @@ class EllipticTxTx(BaseDataset):
 
 
 if __name__ == "__main__":
-    EllipticTxTx(force_reload=True)
+    pre_transform = partial(edge_life, life=7)
+    EllipticTxTx(force_reload=True, pre_transform=(edge_life))

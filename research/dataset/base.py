@@ -16,12 +16,14 @@ class ComputeInfo:
     compute_leids: Tensor = field(default=th.empty(0))
     keep_curr_lrid: Tensor = field(default=th.empty(0))
     keep_prev_lrid: Tensor = field(default=th.empty(0))
+    use_cache: bool = False
 
     def to(self, device: str):
         return ComputeInfo(
             compute_leids=self.compute_leids.to(device, non_blocking=True),
             keep_curr_lrid=self.keep_curr_lrid.to(device, non_blocking=True),
             keep_prev_lrid=self.keep_prev_lrid.to(device, non_blocking=True),
+            use_cache=self.use_cache,
         )
 
 
@@ -35,6 +37,7 @@ class TransferPackage:
     keep_prev_lids: dict[NodeOrEdgeType, Tensor]
     compute_info: ComputeInfo
     is_first: bool = False
+    only_edge: bool = False
 
     def to(self, device: str):
         return TransferPackage(
@@ -57,6 +60,7 @@ class TransferPackage:
             },
             compute_info=self.compute_info.to(device),
             is_first=self.is_first,
+            only_edge=self.only_edge,
         )
 
 
@@ -70,11 +74,17 @@ class BaseDataset(InMemoryDataset):
 
     @override
     def __init__(
-        self, incremental: bool, incremental_threshold: float = 0.2, *args, **kwargs
+        self,
+        incremental: bool,
+        incremental_threshold: float = 0.2,
+        only_edge: bool = False,
+        *args,
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._incremental = incremental
         self._incremental_threshold = incremental_threshold
+        self._only_edge = only_edge
 
     def _reset_cache(self):
         assert hasattr(self, "_data")
@@ -94,6 +104,25 @@ class BaseDataset(InMemoryDataset):
             gids = {t: mask_to_index(masks[t]) for t in types}
             self._metadata[id] = SnapshotMetadata(id, gids, masks, ntypes, etypes)
             self._diffs[id] = self._compute_diff(id)
+
+            if id == 0:
+                self._reordered_gids[id] = {
+                    t: self._metadata[id].gids[t]
+                    for t in (*self._data.node_types, *self._data.edge_types)
+                }
+            else:
+                add_gids = {t: self._diffs[id].add_gids[t] for t in types}
+                keep_prev_lids = {
+                    t: mask_to_index(~mask[self._reordered_gids[id - 1][t]])
+                    for t, mask in self._diffs[id].rm_masks.items()
+                }
+                self._reordered_gids[id] = {
+                    t: th.cat((
+                        self._reordered_gids[id - 1][t][keep_prev_lids[t]],
+                        add_gids[t],
+                    )).contiguous()
+                    for t in types
+                }
 
     def __len__(self):
         assert hasattr(self, "snapshot_ids"), "Add `_reset_cache() to __init__()`"
@@ -118,9 +147,6 @@ class BaseDataset(InMemoryDataset):
 
     def _create_normal_package(self, idx: int):
         meta = self._metadata[idx]
-        self._reordered_gids[idx] = {
-            t: meta.gids[t] for t in (*self._data.node_types, *self._data.edge_types)
-        }
         self._packages[idx] = TransferPackage(
             curr_id=0,
             new_gids=self._reordered_gids[idx],
@@ -138,52 +164,53 @@ class BaseDataset(InMemoryDataset):
             keep_prev_lids={},
             compute_info=ComputeInfo(),
             is_first=True,
+            only_edge=self._only_edge,
         )
 
     def _create_incremental_package(self, idx: int):
         diff = self._diffs[idx]
-        types = (*self._data.node_types, *self._data.edge_types)
-
-        # Add part
-        add_gids = {t: diff.add_gids[t] for t in types}
-        add_xs = {
-            t: self._data[t]["x"][diff.add_gids[t]] for t in self._data.node_types
-        }
-        add_edge_indexes = {
-            t: self._data[t]["edge_index"][:, diff.add_gids[t]]
-            for t in self._data.edge_types
-        }
-        if "edge_attr" in self._data:
-            add_edge_attrs = {
-                t: self._data[t]["edge_attr"][diff.add_gids[t]]
-                for t in self._data.edge_types
-            }
-        else:
-            add_edge_attrs = {}
 
         # Keep part
-        if idx - 1 not in self._reordered_gids:
-            self._create_package(idx - 1)
-
         keep_prev_lids = {
             t: mask_to_index(~mask[self._reordered_gids[idx - 1][t]])
             for t, mask in diff.rm_masks.items()
         }
 
-        self._reordered_gids[idx] = {
-            t: th.cat((
-                self._reordered_gids[idx - 1][t][keep_prev_lids[t]],
-                add_gids[t],
-            )).contiguous()
-            for t in types
+        # Add part
+        add_edge_indexes = {
+            t: self._data[t]["edge_index"][:, diff.add_gids[t]]
+            for t in self._data.edge_types
         }
+        if not self._only_edge:
+            add_xs = {
+                t: self._data[t]["x"][diff.add_gids[t]] for t in self._data.node_types
+            }
+            if "edge_attr" in self._data:
+                add_edge_attrs = {
+                    t: self._data[t]["edge_attr"][diff.add_gids[t]]
+                    for t in self._data.edge_types
+                }
+            else:
+                add_edge_attrs = {}
+        else:
+            add_xs = {
+                t: self._data[t]["x"][self._reordered_gids[idx][t]]
+                for t in self._data.node_types
+            }
+            if "edge_attr" in self._data:
+                add_edge_attrs = {
+                    t: self._data[t]["edge_attr"][self._reordered_gids[idx][t]]
+                    for t in self._data.edge_types
+                }
+            else:
+                add_edge_attrs = {}
 
         # Compute Info
         compute_leids, keep_curr_lrid, keep_prev_lrid = self._create_compute_info(idx)
         if (
             len(compute_leids)
             / len(self._reordered_gids[idx][self._data.edge_types[0]])
-            <= self._incremental_threshold
+            >= self._incremental_threshold
         ):
             compute_info = ComputeInfo()
         else:
@@ -191,6 +218,7 @@ class BaseDataset(InMemoryDataset):
                 compute_leids=compute_leids,
                 keep_curr_lrid=keep_curr_lrid,
                 keep_prev_lrid=keep_prev_lrid,
+                use_cache=True,
             )
 
         self._packages[idx] = TransferPackage(
@@ -201,6 +229,7 @@ class BaseDataset(InMemoryDataset):
             add_edge_attrs=add_edge_attrs,
             keep_prev_lids=keep_prev_lids,
             compute_info=compute_info,
+            only_edge=self._only_edge,
         )
 
     def _create_compute_info(self, idx: int):

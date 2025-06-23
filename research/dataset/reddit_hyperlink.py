@@ -1,11 +1,13 @@
+from functools import partial
 from pathlib import Path
 from typing import override
 
 import polars as pl
 import polars.selectors as cs
-from torch_geometric.data import Data
+from torch_geometric.data.hetero_data import HeteroData
 
 from research.dataset import BaseDataset
+from research.transform import edge_life
 from research.utils.download import download_url
 
 EDGE_URL = "https://snap.stanford.edu/data/soc-redditHyperlinks-body.tsv"
@@ -18,15 +20,26 @@ class RedditBody(BaseDataset):
         self,
         root: str = "./data/reddit-body",
         force_reload: bool = False,
+        incremental: bool = True,
+        incremental_threshold: float = 0.2,
+        only_edge: bool = False,
+        **kwargs,
     ) -> None:
         self.raw_edge_file_name = "soc-redditHyperlinks-body.tsv"
         self.raw_node_file_name = "web-redditEmbeddings-subreddits.csv"
-        super().__init__(root=root, force_reload=force_reload)
+        super().__init__(
+            root=root,
+            force_reload=force_reload,
+            incremental=incremental,
+            incremental_threshold=incremental_threshold,
+            only_edge=only_edge,
+            **kwargs,
+        )
         self.load(self.processed_paths[0])
-        self._data = self._data.pin_memory()
+        self._reset_cache()
 
     @override
-    def process(self):
+    def process(self):  # noqa: PLR0914
         raw_dir = Path(self.raw_dir)
         df_edges = pl.read_csv(
             raw_dir / self.raw_edge_file_name, separator="\t"
@@ -125,15 +138,14 @@ class RedditBody(BaseDataset):
         nmasks = df_node_ir.select(cs.starts_with("mask")).to_torch().T
         emasks = df_edge_ir.select(cs.starts_with("mask")).to_torch().T
 
-        data_list = [
-            Data(
-                x=nfeats,
-                edge_index=edges,
-                edge_attr=efeats,
-                nmasks=nmasks,
-                emasks=emasks,
-            )
-        ]
+        data = HeteroData()
+        data["n"].x = nfeats
+        data["n"].mask = nmasks
+        data["n", "e", "n"].edge_index = edges
+        data["n", "e", "n"].edge_attr = efeats
+        data["n", "e", "n"].mask = emasks
+
+        data_list = [data]
 
         if self.pre_filter is not None:
             data_list = [data for data in data_list if self.pre_filter(data)]
@@ -155,3 +167,8 @@ class RedditBody(BaseDataset):
     @override
     def processed_file_names(self) -> str:
         return "data.pt"
+
+
+if __name__ == "__main__":
+    pre_transform = partial(edge_life, life=20)
+    RedditBody(force_reload=True, pre_transform=pre_transform)

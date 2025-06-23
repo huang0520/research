@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator
 from queue import Queue
-from threading import Event, Lock, Thread
+from threading import Event, Thread
 
 import torch as th
 from torch import Tensor
@@ -85,13 +85,10 @@ class PipelinedIterator:
             raise item[0]
 
         id, data, compute_info, compose_event = item
-        assert (
-            isinstance(id, int)
-            and isinstance(data, HeteroData)
-            and isinstance(compose_event, th.cuda.Event)
-        )
+        with th.cuda.stream(self.compute_stream):
+            th.cuda.current_stream().wait_event(compose_event)  # type:ignore
+            th.cuda.current_stream().synchronize()
 
-        self.compute_stream.wait_event(compose_event)  # type:ignore
         return id, data, compute_info
 
     def _start_loading_thread(self, dataloader_iter: Iterator):
@@ -105,6 +102,7 @@ class PipelinedIterator:
                         package_gpu: TransferPackage = package.to(self.device)
                         transfer_event = th.cuda.Event()
                         transfer_event.record(self.transfer_stream)
+                        transfer_event.synchronize()
 
                     self.package_queue.put((package_gpu, transfer_event))  # type:ignore
 
@@ -138,7 +136,7 @@ class PipelinedIterator:
                         self.compose_stream.wait_event(transfer_event)  # type:ignore
 
                         id, data = self.compose_fn(package, self.prev_data)
-                        self.prev_data = data.clone()
+                        self.prev_data = data.clone().detach()
 
                         compose_event = th.cuda.Event()
                         compose_event.record(self.compose_stream)
@@ -186,10 +184,13 @@ class PackageProcessor:
         for t, gid in package.new_gids.items():
             data[t]["gid"] = gid
         for t, x in package.add_xs.items():
-            data[t]["x"] = th.cat((
-                prev_data[t]["x"][package.keep_prev_lids[t]],
-                x,
-            ))
+            if not package.only_edge:
+                data[t]["x"] = th.cat((
+                    prev_data[t]["x"][package.keep_prev_lids[t]],
+                    x,
+                ))
+            else:
+                data[t]["x"] = x
         for t, edge_index in package.add_edge_indexes.items():
             data[t]["edge_index"] = th.cat(
                 (
@@ -200,10 +201,13 @@ class PackageProcessor:
             )
             data[t]["edge_index"] = self._map_edge_index_to_local(data)
         for t, edge_attr in package.add_edge_attrs.items():
-            data[t]["edge_attr"] = th.cat((
-                prev_data[t]["edge_attr"][package.keep_prev_lids[t]],
-                edge_attr,
-            ))
+            if not package.only_edge:
+                data[t]["edge_attr"] = th.cat((
+                    prev_data[t]["edge_attr"][package.keep_prev_lids[t]],
+                    edge_attr,
+                ))
+            else:
+                data[t]["edge_attr"] = edge_attr
 
         data = data.contiguous()
         return package.curr_id, data

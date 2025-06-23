@@ -37,6 +37,7 @@ requests = ">=2.32.3,<3"
 rich = ">=13.9.4,<14"
 polars = ">=1.24.0,<2"
 cudf = ">=25.4.0,<26"
+loguru = ">=0.7.3,<0.8"
 
 # Linter & Formater
 [tool.ruff]

@@ -19,11 +19,12 @@ class Epinions(BaseDataset):
         self,
         root: str = "./data/epinions",
         force_reload: bool = False,
+        share_data: HeteroData | None = None,
+        **kwargs,
     ) -> None:
         self.raw_edge_name = "rec-epinions-user-ratings.csv"
-        super().__init__(root=root, force_reload=force_reload)
+        super().__init__(root=root, force_reload=force_reload, **kwargs)
         self.load(self.processed_paths[0])
-        self._data = self._data.pin_memory()
         self._reset_cache()
 
     @override
@@ -47,8 +48,8 @@ class Epinions(BaseDataset):
         emasks = df_edges.select(cs.starts_with("mask")).to_torch().T
 
         # Extract node snapshot masks
-        umasks = th.zeros((emasks.shape[0], n_users))
-        pmasks = th.zeros((emasks.shape[0], n_products))
+        umasks = th.zeros((emasks.shape[0], n_users), dtype=th.bool)
+        pmasks = th.zeros((emasks.shape[0], n_products), dtype=th.bool)
 
         for i in range(emasks.shape[0]):
             u, p = df_edges.filter(f"mask_{i}")["user", "product"]

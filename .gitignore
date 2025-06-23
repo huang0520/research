@@ -9,3 +9,4 @@ output/
 /data/
 tmp/
 incremental_trace.json
+benchmark_result/

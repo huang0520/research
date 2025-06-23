@@ -33,11 +33,15 @@ class TGCN(nn.Module):
 
         self.cache_gconv = cache_gconv
         self.max_nodes = max_nodes
-        if cache_gconv and max_nodes:
-            self.register_buffer("gconv_cache", th.zeros(max_nodes, gcn_out))
+
+        if self.cache_gconv:
+            if max_nodes > 0:
+                self.register_buffer("gconv_cache", th.zeros(max_nodes, gcn_out))
+            else:
+                self.gconv_cache = None
             self.cache_valid = False
         else:
-            self.gconv_cache: Tensor | None = None
+            self.gconv_cache = None
             self.cache_valid = False
 
     def forward(
@@ -54,24 +58,33 @@ class TGCN(nn.Module):
             self.cache_gconv
             and self.cache_valid
             and compute_info is not None
-            and len(compute_info.compute_leids) != 0
+            and compute_info.use_cache
+            and compute_info.keep_curr_lrid.nelement() != 0
         ):
             edge_index_ = edge_index[:, compute_info.compute_leids]
             x = self.gconv(x, edge_index_)
 
-            if len(compute_info.keep_curr_lrid) != 0:
-                x[compute_info.keep_curr_lrid] = self.gconv_cache[
-                    compute_info.keep_prev_lrid
-                ]
+            x[compute_info.keep_curr_lrid] = self.gconv_cache[
+                compute_info.keep_prev_lrid
+            ]
         else:
             x = self.gconv(x, edge_index)
 
         if self.cache_gconv:
             if self.max_nodes:
-                self.gconv_cache[: x.size(0)].copy_(x)
+                self.gconv_cache[: x.size(0)] = x
+            elif self.gconv_cache is None or self.gconv_cache.size(0) < x.size(0):
+                self.gconv_cache = x
             else:
-                self.gconv_cache.clone()
+                self.gconv_cache[: x.size(0)] = x
+
             self.cache_valid = True
 
         x = x.view([1, *x.shape])
         return self.gru(x, hidden)
+
+    def reset_cache(self):
+        """Reset cache state"""
+        self.cache_valid = False
+        if self.gconv_cache is not None:
+            self.gconv_cache.zero_()
